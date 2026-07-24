@@ -1186,6 +1186,137 @@ def chatwoot_envia_mensagem(base, acc, conv, token, content):
         return 200 <= getattr(resp, "status", 200) < 300
 
 
+def _cw_req(base, caminho, token, corpo=None):
+    """GET/POST na API do Chatwoot; devolve o JSON da resposta (dict/list).
+    corpo=None -> GET. Levanta excecao em erro (o chamador traduz)."""
+    url = "%s%s" % (base, caminho)
+    dados = json.dumps(corpo).encode("utf-8") if corpo is not None else None
+    req = urllib.request.Request(url, data=dados, method="POST" if corpo is not None else "GET",
+                                 headers=chatwoot_headers(token, json_body=corpo is not None))
+    with _ABRIDOR_SEM_REDIRECT.open(req, timeout=12) as resp:
+        try:
+            return json.loads(resp.read().decode("utf-8"))
+        except Exception:
+            return {}
+
+
+def _cw_payload(d):
+    """As respostas do Chatwoot vem em formatos variados ({payload: ...},
+    {payload: {contact: ...}}, ou direto). Desembrulha ate o miolo."""
+    if isinstance(d, dict) and "payload" in d:
+        d = d["payload"]
+    if isinstance(d, dict) and "contact" in d and isinstance(d["contact"], dict):
+        d = d["contact"]
+    return d
+
+
+def _cw_conv_num(c):
+    """Numero da conversa (o que aparece na URL do painel): display_id
+    quando existe, senao id."""
+    if not isinstance(c, dict):
+        return None
+    return conv_id_valido(c.get("display_id") if c.get("display_id") is not None else c.get("id"))
+
+
+class ChatwootErro(Exception):
+    """Erro amigavel (em PT) para mostrar ao usuario no toast."""
+
+
+def chatwoot_conectar(base, acc, token, inbox_id, nome, telefone):
+    """Acha (ou cria) o CONTATO pelo telefone e devolve o numero de uma conversa
+    dele — reusa a conversa antiga se existir; senao cria uma nova na caixa de
+    entrada configurada. Retorna (conversa_num, contato_id)."""
+    dig = norm_phone(telefone).lstrip("0")  # 0 de tronco fora (011... -> 11...)
+    if len(dig) < 8:
+        raise ChatwootErro("Este lead não tem telefone válido para conectar no Chatwoot")
+    if len(dig) <= 11:
+        dig = "55" + dig
+    e164 = "+" + dig
+
+    def _busca_contato():
+        # busca pelos ULTIMOS 8 digitos (estavel com/sem o 9º dígito) e valida
+        # cada candidato com same_phone (igualdade canonica: DDI/0/9º dígito) —
+        # sufixo solto casava contato de OUTRO DDD ou telefone curto/lixo.
+        try:
+            res = _cw_req(base, "/api/v1/accounts/%s/contacts/search?q=%s" % (acc, dig[-8:]), token)
+        except Exception:
+            return None
+        achados = _cw_payload(res)
+        if not isinstance(achados, list):
+            return None
+        for c in achados:
+            tel_c = norm_phone((c or {}).get("phone_number"))
+            if tel_c and len(tel_c) >= 8 and same_phone(tel_c, dig):
+                return c.get("id")
+        return None
+
+    contato_id = _busca_contato()
+    if not contato_id:
+        try:
+            res = _cw_req(base, "/api/v1/accounts/%s/contacts" % acc, token,
+                          {"name": nome or e164, "phone_number": e164})
+            c = _cw_payload(res)
+            contato_id = c.get("id") if isinstance(c, dict) else None
+        except urllib.error.HTTPError as e:
+            if e.code == 422:  # telefone ja cadastrado la — busca de novo
+                contato_id = _busca_contato()
+            else:
+                raise ChatwootErro("O Chatwoot recusou o cadastro do contato (HTTP %d)" % e.code)
+    if not contato_id:
+        raise ChatwootErro("Não consegui achar nem cadastrar o contato no Chatwoot")
+
+    # conversa antiga do contato? (recuperacao: reaproveita o historico).
+    # Falha na CONSULTA e erro (tentar de novo) — tratar como "sem conversa"
+    # criaria uma conversa duplicada e o historico antigo se perderia.
+    try:
+        res = _cw_req(base, "/api/v1/accounts/%s/contacts/%s/conversations" % (acc, contato_id), token)
+    except Exception:
+        raise ChatwootErro("Não consegui consultar as conversas do cliente no Chatwoot — "
+                           "tente de novo em alguns segundos")
+    convs = _cw_payload(res)
+    if isinstance(convs, list):
+        candidatas = [c for c in convs if _cw_conv_num(c)]
+        escolhida = None
+        # prefere a conversa da CAIXA configurada (canal oficial de WhatsApp);
+        # sem preferencia aplicavel, fica a primeira (mais recente no Chatwoot)
+        if inbox_id:
+            escolhida = next((c for c in candidatas
+                              if str(c.get("inbox_id") or "") == str(inbox_id)), None)
+        if not escolhida and candidatas:
+            escolhida = candidatas[0]
+        if escolhida:
+            return int(_cw_conv_num(escolhida)), contato_id
+
+    # nenhuma conversa: cria uma nova na caixa de entrada configurada
+    if not inbox_id:
+        raise ChatwootErro("Este cliente não tem conversa no Chatwoot ainda — preencha o "
+                           "Nº da caixa de entrada em Gerenciar → Campanhas (o Testar conexão "
+                           "mostra os números) para o CRM poder criar a conversa")
+    try:
+        res = _cw_req(base, "/api/v1/accounts/%s/contacts/%s/contact_inboxes" % (acc, contato_id),
+                      token, {"inbox_id": int(inbox_id)})
+        src = _cw_payload(res)
+        source_id = src.get("source_id") if isinstance(src, dict) else None
+        corpo = {"inbox_id": int(inbox_id), "contact_id": contato_id, "status": "open"}
+        if source_id:
+            corpo["source_id"] = source_id
+        res = _cw_req(base, "/api/v1/accounts/%s/conversations" % acc, token, corpo)
+        num = _cw_conv_num(_cw_payload(res))
+        if not num:
+            raise ChatwootErro("O Chatwoot criou a conversa mas não devolveu o número dela — "
+                               "recarregue e tente de novo")
+        # int: o webhook compara conversation_id como numero — string quebraria
+        # o vinculo quando o cliente responder
+        return int(num), contato_id
+    except ChatwootErro:
+        raise
+    except urllib.error.HTTPError as e:
+        raise ChatwootErro("O Chatwoot recusou a criação da conversa (HTTP %d) — confira o "
+                           "Nº da caixa de entrada" % e.code)
+    except Exception as e:
+        raise ChatwootErro("Não consegui criar a conversa no Chatwoot (%s)" % type(e).__name__)
+
+
 # ---------------------------------------------------------------------------
 # Permissoes por papel
 # ---------------------------------------------------------------------------
@@ -2066,6 +2197,8 @@ class Handler(BaseHTTPRequestHandler):
                     st["chatwoot_url"] = chatwoot_base_url(body["chatwoot_url"])
                 if "chatwoot_account_id" in body:
                     st["chatwoot_account_id"] = re.sub(r"[^0-9]", "", str(body["chatwoot_account_id"]))
+                if "chatwoot_inbox_id" in body:
+                    st["chatwoot_inbox_id"] = re.sub(r"[^0-9]", "", str(body["chatwoot_inbox_id"]))
                 if "chatwoot_token" in body:
                     st["chatwoot_token"] = str(body["chatwoot_token"] or "").strip()
                 if "chatwoot_saudacao" in body:
@@ -2114,13 +2247,28 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:
                 return self.send_json(200, {"ok": False, "mensagem":
                     "❌ Não consegui falar com o Chatwoot (%s) — tente de novo." % type(e).__name__})
+            # lista as caixas de entrada (o gestor precisa do Nº p/ o CRM criar
+            # conversas novas — leads da recuperação sem conversa antiga)
+            caixas_txt = ""
+            try:
+                res = _cw_req(base, "/api/v1/accounts/%s/inboxes" % acc, token)
+                caixas = _cw_payload(res)
+                if isinstance(caixas, list) and caixas:
+                    nomes = ["Nº %s = %s" % (c.get("id"), c.get("name") or "?")
+                             for c in caixas if isinstance(c, dict)]
+                    caixas_txt = " Caixas de entrada: " + " · ".join(nomes) + "."
+            except Exception:
+                pass
+            inbox_cfg = str(_db.get("settings", {}).get("chatwoot_inbox_id") or "").strip()
+            aviso_inbox = "" if inbox_cfg else (" ⚠️ Preencha o Nº da caixa de entrada para o CRM "
+                                                "poder CRIAR conversa para cliente que ainda não tem.")
             if not saud:
                 return self.send_json(200, {"ok": True, "mensagem":
-                    "✅ Conexão OK (token e conta Nº %s válidos) — mas a saudação está vazia. "
-                    "Escreva a mensagem e salve." % acc})
+                    ("✅ Conexão OK (token e conta Nº %s válidos) — mas a saudação está vazia. "
+                     "Escreva a mensagem e salve.%s%s") % (acc, caixas_txt, aviso_inbox)})
             return self.send_json(200, {"ok": True, "mensagem":
-                "✅ Tudo certo! Token válido e conta Nº %s acessível — o botão "
-                "\"Atender no Chatwoot\" vai enviar a saudação automática." % acc})
+                ("✅ Tudo certo! Token válido e conta Nº %s acessível — o botão "
+                 "\"Atender no Chatwoot\" vai enviar a saudação automática.%s%s") % (acc, caixas_txt, aviso_inbox)})
 
         # Relatorio por campanha (quantos leads/produtores/ganhos e R$ cada uma gerou)
         if path == "/api/report/campanhas" and method == "GET":
@@ -2594,6 +2742,8 @@ class Handler(BaseHTTPRequestHandler):
                 conv = conv_id_valido(lead.get("chatwoot_conversation_id"))
                 conv_url = chatwoot_conversa_url(base, acc, conv)
                 nome = str(lead.get("nome") or "").strip()
+                telefone = lead.get("telefone") or ""
+                inbox = str(_db.get("settings", {}).get("chatwoot_inbox_id") or "").strip()
                 autor, papel = user["nome"], user["papel"]
                 ja_pendente = bool(lead.get("aguardando_resposta"))
                 ultimo = lead["historico"][-1] if lead.get("historico") else None
@@ -2605,12 +2755,43 @@ class Handler(BaseHTTPRequestHandler):
                 # trava de duplo-clique: uma requisicao em voo por lead
                 if lead_id in _cw_em_voo:
                     return self.send_json(200, {"conversa_url": conv_url, "enviada": False,
-                                                "erro": None, "tem_conversa": bool(conv),
+                                                "erro": None if conv else
+                                                "Já estamos conectando este lead no Chatwoot — aguarde uns segundos",
+                                                "tem_conversa": bool(conv),
                                                 "configurado": configurado,
                                                 "chatwoot_url": base, "chatwoot_account_id": acc})
                 _cw_em_voo.add(lead_id)
             enviada, erro = False, None
+            conectada = False
             try:
+                # Lead SEM conversa (recuperacao/importado): CONECTA no Chatwoot —
+                # acha o contato pelo telefone, REUSA a conversa antiga (com o
+                # historico) ou cria uma nova na caixa de entrada. FORA do lock.
+                if not conv and configurado and not encerrado:
+                    try:
+                        conv_novo, contato_id = chatwoot_conectar(base, acc, token, inbox, nome, telefone)
+                        with _lock:
+                            l2 = next((l for l in _db["leads"] if l["id"] == lead_id), None)
+                            if l2:
+                                ja_conv = conv_id_valido(l2.get("chatwoot_conversation_id"))
+                                if ja_conv:  # outro clique conectou primeiro: respeita
+                                    conv = ja_conv
+                                else:
+                                    l2["chatwoot_conversation_id"] = conv_novo
+                                    if contato_id and not l2.get("chatwoot_contact_id"):
+                                        l2["chatwoot_contact_id"] = contato_id
+                                    registra_hist(l2, autor, ["🔗 Conversa conectada no Chatwoot"], papel=papel)
+                                    l2["updated_at"] = now_iso()
+                                    save_db()
+                                    conv = conv_novo
+                                    conectada = True
+                        conv_url = chatwoot_conversa_url(base, acc, conv)
+                        deve_enviar = bool(conv) and bool(saud) and \
+                            not (ja_pendente and ultimo and ultimo.get("tipo") == "contato")
+                    except ChatwootErro as e:
+                        erro = str(e)
+                    except Exception as e:
+                        erro = "Não consegui conectar no Chatwoot (%s)" % type(e).__name__
                 # envia a saudacao FORA do lock (chamada externa pode demorar)
                 if deve_enviar:
                     primeiro = nome.split()[0] if nome else ""
@@ -2644,9 +2825,12 @@ class Handler(BaseHTTPRequestHandler):
             finally:
                 with _lock:
                     _cw_em_voo.discard(lead_id)
+            with _lock:
+                lead_atual = next((l for l in _db["leads"] if l["id"] == lead_id), None)
             return self.send_json(200, {"conversa_url": conv_url, "enviada": enviada,
+                                        "conectada": conectada,
                                         "erro": erro, "tem_conversa": bool(conv),
-                                        "configurado": configurado,
+                                        "configurado": configurado, "lead": lead_atual,
                                         "chatwoot_url": base, "chatwoot_account_id": acc})
 
         # Criar

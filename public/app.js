@@ -787,13 +787,28 @@ function atenderNoChatwoot(lead, jaAbriu) {
       // guarda a base p/ os próximos cliques abrirem a aba na hora
       if (res.chatwoot_url) settings.chatwoot_url = res.chatwoot_url;
       if (res.chatwoot_account_id) settings.chatwoot_account_id = res.chatwoot_account_id;
+      // lead recém-CONECTADO: atualiza o cache já — o botão vira o link real
+      if (res.lead) {
+        const l2 = leadsCache.find((x) => x.id === lead.id);
+        if (l2) Object.assign(l2, res.lead);
+        renderBoard();
+        if (form.id.value === lead.id) {
+          const cwEl2 = $('#cwLead');
+          const href2 = chatwootConvUrl(res.lead);
+          if (cwEl2 && href2) { cwEl2.setAttribute('href', href2); cwEl2.textContent = '📨 Atender no Chatwoot'; cwEl2.hidden = false; }
+        }
+      }
       if (!jaAbriu && !url && res.conversa_url) {
         // fora do gesto do clique o navegador pode bloquear a aba — avisa
         const w = window.open(res.conversa_url, '_blank', 'noopener');
-        if (!w) toast('🔒 O navegador bloqueou a aba — clique no botão de novo para abrir a conversa');
+        if (!w && !res.conectada) toast('🔒 O navegador bloqueou a aba — clique no botão de novo para abrir a conversa');
       }
-      if (res.enviada) toast('📨 Saudação enviada no Chatwoot');
-      else if (res.erro) toast('⚠️ ' + res.erro + ' — mande a saudação pela conversa');
+      if (res.conectada) toast(res.enviada
+        ? '🔗 Conversa conectada + saudação enviada! Se a aba não abriu, clique de novo no botão'
+        : (res.erro ? '🔗 Conversa conectada, mas a saudação falhou: ' + res.erro
+                    : '🔗 Conversa conectada! Clique de novo no botão para abrir'));
+      else if (res.enviada) toast('📨 Saudação enviada no Chatwoot');
+      else if (res.erro) toast('⚠️ ' + res.erro + (res.tem_conversa ? ' — mande a saudação pela conversa' : ''));
       else if (!res.configurado) {
         const gestor = me && (me.papel === 'admin' || me.papel === 'gerente');
         toast(gestor ? 'Configure o Chatwoot em ⚙️ Gerenciar → 📣 Campanhas para ativar a saudação automática'
@@ -1298,6 +1313,16 @@ function renderCard(lead) {
     });
     r.append(b);
     card.append(r);
+  } else if (lead.telefone && !STATUS_ENCERRADOS.includes(lead.status) && settings.chatwoot_url && settings.chatwoot_account_id) {
+    // lead SEM conversa (recuperação/importado): o CRM acha o cliente no
+    // Chatwoot pelo telefone, REUSA a conversa antiga (ou cria) e já sauda
+    const r = el('div', 'row');
+    const b = el('button', 'cw-btn conectar', '🔗 Conectar no Chatwoot');
+    b.type = 'button';
+    b.title = 'Procura este cliente no Chatwoot pelo telefone, reaproveita a conversa antiga (ou cria uma nova) e envia a saudação';
+    b.addEventListener('click', (e) => { e.stopPropagation(); atenderNoChatwoot(lead); });
+    r.append(b);
+    card.append(r);
   }
   if (lead.regiao) { const r = el('div', 'row'); r.append(el('span', 'ic', '📍'), document.createTextNode(lead.regiao)); card.append(r); }
   if (lead.area_cultivada) { const r = el('div', 'row'); r.append(el('span', 'ic', '🌾'), document.createTextNode(lead.area_cultivada)); card.append(r); }
@@ -1472,10 +1497,12 @@ function openModal(lead) {
     'campanha', 'utm_source', 'utm_medium', 'utm_campaign', 'utm_content', 'observacoes', 'origem_canal'];
   for (const f of fields) if (form[f]) form[f].value = lead[f] != null ? lead[f] : '';
   atualizaWaLead();
-  // link "Atender no Chatwoot" só para lead com conversa lá (href = link real,
-  // p/ o navegador abrir a aba sem depender de window.open/pop-up)
+  // "Atender no Chatwoot": com conversa vinculada é um link real (o navegador
+  // abre a aba sem pop-up); sem conversa vira "Conectar" (acha/cria lá e sauda)
   const cwEl = $('#cwLead');
-  cwEl.hidden = !lead.chatwoot_conversation_id;
+  const cwPodeConectar = !!(lead.telefone && !STATUS_ENCERRADOS.includes(lead.status) && settings.chatwoot_url && settings.chatwoot_account_id);
+  cwEl.hidden = !(lead.chatwoot_conversation_id || (cwPodeConectar && !isNew));
+  cwEl.textContent = lead.chatwoot_conversation_id ? '📨 Atender no Chatwoot' : '🔗 Conectar no Chatwoot';
   const cwHref = chatwootConvUrl(lead);
   if (cwHref) cwEl.setAttribute('href', cwHref);
   else cwEl.removeAttribute('href');
@@ -2087,6 +2114,7 @@ function renderCampaigns() {
   // config do Chatwoot (o token nunca volta do servidor; o placeholder indica se já existe)
   $('#cwUrl').value = settings.chatwoot_url || '';
   $('#cwAccount').value = settings.chatwoot_account_id || '';
+  $('#cwInbox').value = settings.chatwoot_inbox_id || '';
   $('#cwToken').value = '';
   $('#cwToken').placeholder = settings.chatwoot_token_definido ? '••••••• (já salvo — cole p/ trocar)' : 'cole o token aqui';
   $('#cwSaudacao').value = settings.chatwoot_saudacao || '';
@@ -2201,6 +2229,7 @@ $('#btnSaveCw').addEventListener('click', async () => {
   const body = {
     chatwoot_url: $('#cwUrl').value,
     chatwoot_account_id: $('#cwAccount').value,
+    chatwoot_inbox_id: $('#cwInbox').value,
     chatwoot_saudacao: $('#cwSaudacao').value,
   };
   const tok = $('#cwToken').value.trim();

@@ -474,6 +474,8 @@ body.modo-servicos .toolbar { background: #eef8fb; box-shadow: inset 0 3px 0 #0e
 }
 .cw-btn:hover { background: #dce9fa; }
 a.cw-btn, a.cw-btn:visited { text-decoration: none; color: #1f4b99; } /* é um LINK de verdade (pop-up não barra) */
+.cw-btn.conectar { color: #6d28d9; background: #f3ecfe; border-color: #d3bdf7; } /* ainda sem conversa: conectar */
+.cw-btn.conectar:hover { background: #ebdffd; }
 #cwLead.cw-btn { margin-top: 4px; }
 /* resultado do "Testar conexão" do Chatwoot (texto claro p/ o gestor) */
 .cw-teste {
