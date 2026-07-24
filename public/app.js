@@ -899,10 +899,26 @@ function renderMap() {
       wa.addEventListener('click', () => registrarContatoWhatsapp(lead.id));
       acoes.append(wa);
     }
-    if (lead.chatwoot_conversation_id) {
+    const cwUrlMapa = chatwootConvUrl(lead);
+    if (lead.chatwoot_conversation_id && cwUrlMapa) {
+      // link REAL: abre a conversa sem depender de pop-up; saudação em 2º plano
+      const cw = document.createElement('a');
+      cw.className = 'pp-btn cw'; cw.href = cwUrlMapa; cw.target = '_blank'; cw.rel = 'noopener';
+      cw.textContent = '📨 Chatwoot';
+      cw.title = 'Atender pelo canal oficial (com saudação automática)';
+      cw.addEventListener('click', () => atenderNoChatwoot(lead, true));
+      acoes.append(cw);
+    } else if (lead.chatwoot_conversation_id) {
       const cw = el('button', 'pp-btn cw', '📨 Chatwoot');
       cw.type = 'button';
       cw.title = 'Atender pelo canal oficial (com saudação automática)';
+      cw.onclick = () => atenderNoChatwoot(lead);
+      acoes.append(cw);
+    } else if (lead.telefone && !STATUS_ENCERRADOS.includes(lead.status) && settings.chatwoot_url && settings.chatwoot_account_id) {
+      // sem conversa ainda: conecta (acha/cria lá e sauda) direto do mapa
+      const cw = el('button', 'pp-btn cw conectar', '🔗 Conectar no Chatwoot');
+      cw.type = 'button';
+      cw.title = 'Acha o cliente no Chatwoot pelo telefone, reaproveita a conversa antiga e envia a saudação';
       cw.onclick = () => atenderNoChatwoot(lead);
       acoes.append(cw);
     }
