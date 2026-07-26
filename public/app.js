@@ -2633,8 +2633,43 @@ $('#btnRefresh').addEventListener('click', async () => {
   toast((await refreshAll()) ? 'Atualizado' : 'Erro ao atualizar — o servidor está no ar?');
 });
 $('#btnCampaigns').addEventListener('click', () => {
-  renderCampaigns(); renderCampReport();
+  renderCampaigns(); renderCampReport(); loadWebhookInfo();
   $('#campBackdrop').hidden = false;
+});
+
+// a "ponte" Chatwoot -> CRM: mostra o endereço do webhook e se está entregando
+async function loadWebhookInfo() {
+  try {
+    const info = await api('/api/webhook-info');
+    $('#whUrl').value = info.url || '';
+    const st = $('#whStatus');
+    st.hidden = false;
+    if (info.total_chatwoot > 0) {
+      st.className = 'cw-teste ok';
+      st.textContent = '✅ Ponte funcionando — ' + info.total_chatwoot + ' lead(s) já chegaram do Chatwoot'
+        + (info.ultimo_lead ? ' · último em ' + dataHora(info.ultimo_lead, true) : '') + '.';
+    } else if (info.ultimo_evento) {
+      st.className = 'cw-teste ok';
+      st.textContent = '🔄 O Chatwoot está entregando eventos (último ' + dataHora(info.ultimo_evento, true)
+        + '), mas nenhum lead novo ainda — deve aparecer na próxima conversa criada.';
+    } else {
+      st.className = 'cw-teste falha';
+      st.textContent = '⚠️ Nenhum evento do Chatwoot chegou ainda — a ponte NÃO está ligada. '
+        + 'Copie o endereço acima e cadastre no Chatwoot (passo a passo acima).';
+    }
+  } catch (_) { /* painel é gestor-only; silencioso */ }
+}
+$('#btnCopiarWh').addEventListener('click', async () => {
+  const v = $('#whUrl').value;
+  if (!v) { toast('Abra o painel de novo — o endereço ainda não carregou'); return; }
+  try {
+    await navigator.clipboard.writeText(v);
+    toast('📋 Endereço copiado — agora cole no Chatwoot (Integrações → Webhooks)');
+  } catch (_) {
+    $('#whUrl').select();
+    document.execCommand('copy');
+    toast('📋 Endereço copiado');
+  }
 });
 $('#campClose').addEventListener('click', () => { $('#campBackdrop').hidden = true; refreshAll(); });
 $('#campBackdrop').addEventListener('click', (e) => {

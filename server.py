@@ -170,6 +170,7 @@ MIME = {
 _lock = threading.Lock()
 # leads com envio de saudacao (Chatwoot) em andamento — trava de duplo-clique
 _cw_em_voo = set()
+_webhook_ultimo = None  # ultimo evento recebido do Chatwoot (desde o boot)
 # presenca "online": user_id -> ultima vez visto (ISO). So em memoria (efemero,
 # nao vai pro disco); atualizado a cada requisicao autenticada.
 _online = {}
@@ -1854,6 +1855,9 @@ class Handler(BaseHTTPRequestHandler):
         token = (qs.get("token") or [None])[0] or self.headers.get("X-Webhook-Token")
         if token != WEBHOOK_TOKEN:
             return self.send_json(401, {"error": "Token invalido"})
+        # marca que o Chatwoot está entregando eventos (indicador no painel)
+        global _webhook_ultimo
+        _webhook_ultimo = now_iso()
         try:
             payload = self.read_body()
         except Exception:
@@ -2256,6 +2260,22 @@ class Handler(BaseHTTPRequestHandler):
         # Testa a conexao com o Chatwoot e devolve um veredito em portugues claro
         # (token errado? conta errada? servidor fora?). So gestor. NUNCA inclui o
         # token nas mensagens.
+        # Endereço do webhook (a "ponte" Chatwoot -> CRM) + status de recebimento.
+        # Só gestor vê — a URL carrega o token secreto do webhook.
+        if path == "/api/webhook-info" and method == "GET":
+            if not gestor:
+                return self.send_json(403, {"error": "Disponível só para gerente/administrador"})
+            host = self.headers.get("Host") or ("localhost:%d" % PORT)
+            proto = self.headers.get("X-Forwarded-Proto") or (
+                "http" if host.split(":")[0] in ("localhost", "127.0.0.1") else "https")
+            url = "%s://%s/webhook/chatwoot?token=%s" % (proto, host, WEBHOOK_TOKEN or ensure_webhook_token())
+            with _lock:
+                cw = [l for l in _db["leads"] if l.get("source") == "chatwoot"]
+                ultimo_lead = max((str(l.get("created_at") or "") for l in cw), default="") or None
+            return self.send_json(200, {"url": url, "total_chatwoot": len(cw),
+                                        "ultimo_lead": ultimo_lead,
+                                        "ultimo_evento": _webhook_ultimo})
+
         if path == "/api/chatwoot/teste" and method == "POST":
             if not gestor:
                 return self.send_json(403, {"error": "Teste disponível só para gerente/administrador"})
