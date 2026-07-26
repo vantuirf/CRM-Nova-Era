@@ -2847,6 +2847,50 @@ $('#chatArquivo').addEventListener('change', async (e) => {
   } catch (err) { toast('Erro no arquivo: ' + err.message); }
 });
 
+// conversor MP3 (lamejs, arquivo local) — carregado só quando alguém grava.
+// O navegador grava em webm, que o WhatsApp NÃO aceita; convertido pra MP3
+// o áudio chega e toca em qualquer aparelho.
+let _lamejsPronto = null;
+function carregaLamejs() {
+  if (window.lamejs) return Promise.resolve();
+  if (_lamejsPronto) return _lamejsPronto;
+  _lamejsPronto = new Promise((res, rej) => {
+    const s = document.createElement('script');
+    s.src = 'vendor/lamejs/lame.min.js';
+    s.onload = () => res();
+    s.onerror = () => { _lamejsPronto = null; rej(new Error('conversor não carregou')); };
+    document.head.append(s);
+  });
+  return _lamejsPronto;
+}
+
+async function audioParaMp3(blob) {
+  await carregaLamejs();
+  const ac = new (window.AudioContext || window.webkitAudioContext)();
+  try {
+    const buf = await ac.decodeAudioData(await blob.arrayBuffer());
+    const canal = buf.getChannelData(0); // mono é suficiente (e menor) para voz
+    const amostras = new Int16Array(canal.length);
+    for (let i = 0; i < canal.length; i++) {
+      const s = Math.max(-1, Math.min(1, canal[i]));
+      amostras[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+    }
+    const enc = new lamejs.Mp3Encoder(1, buf.sampleRate, 64); // 64 kbps: voz leve
+    const pedacos = [];
+    const bloco = 1152;
+    for (let i = 0; i < amostras.length; i += bloco) {
+      const d = enc.encodeBuffer(amostras.subarray(i, i + bloco));
+      if (d.length) pedacos.push(new Int8Array(d));
+    }
+    const fim = enc.flush();
+    if (fim.length) pedacos.push(new Int8Array(fim));
+    if (!pedacos.length) throw new Error('conversão vazia');
+    return new Blob(pedacos, { type: 'audio/mpeg' });
+  } finally {
+    ac.close().catch(() => {});
+  }
+}
+
 // gravação de áudio (🎤): um clique grava, outro para e anexa
 let chatGravador = null;
 $('#chatGravar').addEventListener('click', async () => {
@@ -2868,12 +2912,27 @@ $('#chatGravar').addEventListener('click', async () => {
       stream.getTracks().forEach((t) => t.stop());
       chatGravador = null;
       btn.classList.remove('gravando'); btn.textContent = '🎤';
-      const blob = new Blob(pedacos, { type: rec.mimeType || 'audio/webm' });
+      let blob = new Blob(pedacos, { type: rec.mimeType || 'audio/webm' });
       if (!blob.size) { toast('Gravação vazia — tente de novo'); return; }
+      let nomeAudio = 'audio-' + Date.now();
+      const mimeBase = (blob.type || '').split(';')[0];
+      if (['audio/mp4', 'audio/aac', 'audio/mpeg', 'audio/ogg', 'audio/x-m4a'].includes(mimeBase)) {
+        // já é um formato que o WhatsApp aceita (ex.: iPhone grava em mp4)
+        nomeAudio += mimeBase === 'audio/mpeg' ? '.mp3' : mimeBase === 'audio/ogg' ? '.ogg' : '.m4a';
+      } else {
+        // webm (Chrome/Android): converte pra MP3 — senão o WhatsApp não toca
+        try {
+          toast('🎛 Preparando o áudio…');
+          blob = await audioParaMp3(blob);
+          nomeAudio += '.mp3';
+        } catch (_) {
+          nomeAudio += '.webm'; // fallback: envia como veio (toca no Chatwoot)
+        }
+      }
       if (blob.size > 10 * 1024 * 1024) { toast('Áudio muito longo — o limite é 10 MB'); return; }
       const dataUrl = await new Promise((res) => { const r = new FileReader(); r.onload = () => res(r.result); r.readAsDataURL(blob); });
-      chatAnexo = dataUrlParaAnexo(dataUrl, 'audio-' + Date.now() + '.webm');
-      if (chatAnexo) mostraChatAnexo('🎤 áudio gravado (' + Math.round(blob.size / 1024) + ' KB)');
+      chatAnexo = dataUrlParaAnexo(dataUrl, nomeAudio);
+      if (chatAnexo) mostraChatAnexo('🎤 áudio gravado (' + Math.round(blob.size / 1024) + ' KB) — pronto p/ enviar');
     };
     rec.start();
     chatGravador = rec;
