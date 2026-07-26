@@ -2833,6 +2833,93 @@ class Handler(BaseHTTPRequestHandler):
                                         "configurado": configurado, "lead": lead_atual,
                                         "chatwoot_url": base, "chatwoot_account_id": acc})
 
+        # Mensagem escrita NO CRM e enviada pelo Chatwoot (canal oficial). Se o
+        # lead ainda nao tem conversa, conecta primeiro (mesmo fluxo do botao).
+        # Mensagem manual e deliberada: vale tambem para lead encerrado (pos-venda).
+        mmsg = re.match(r"^/api/leads/([^/]+)/chatwoot-mensagem$", path)
+        if mmsg and method == "POST":
+            lead_id = mmsg.group(1)
+            try:
+                body = self.read_body()
+            except Exception:
+                return self.send_json(400, {"error": "Corpo invalido"})
+            texto = str(body.get("texto") or "").strip()[:2000]
+            if not texto:
+                return self.send_json(400, {"error": "Escreva a mensagem antes de enviar"})
+            base, acc, token, _saud = chatwoot_cfg()
+            if not (base and acc and token):
+                return self.send_json(400, {"error": "Chatwoot não configurado — peça ao gestor "
+                                            "para configurar em Gerenciar → Campanhas"})
+            with _lock:
+                lead = next((l for l in _db["leads"] if l["id"] == lead_id), None)
+                if not lead or not pode_ver_lead(user, lead):
+                    return self.send_json(404, {"error": "Lead nao encontrado"})
+                conv = conv_id_valido(lead.get("chatwoot_conversation_id"))
+                nome = str(lead.get("nome") or "").strip()
+                telefone = lead.get("telefone") or ""
+                inbox = str(_db.get("settings", {}).get("chatwoot_inbox_id") or "").strip()
+                autor, papel = user["nome"], user["papel"]
+                if lead_id in _cw_em_voo:
+                    return self.send_json(409, {"error": "Já tem um envio em andamento para este lead — aguarde uns segundos"})
+                _cw_em_voo.add(lead_id)
+            conectada, enviada, erro = False, False, None
+            try:
+                # conecta se preciso (FORA do lock; mesmo padrao do botao)
+                if not conv:
+                    try:
+                        conv_novo, contato_id = chatwoot_conectar(base, acc, token, inbox, nome, telefone)
+                        with _lock:
+                            l2 = next((l for l in _db["leads"] if l["id"] == lead_id), None)
+                            if l2:
+                                ja_conv = conv_id_valido(l2.get("chatwoot_conversation_id"))
+                                if ja_conv:
+                                    conv = ja_conv
+                                else:
+                                    l2["chatwoot_conversation_id"] = conv_novo
+                                    if contato_id and not l2.get("chatwoot_contact_id"):
+                                        l2["chatwoot_contact_id"] = contato_id
+                                    registra_hist(l2, autor, ["🔗 Conversa conectada no Chatwoot"], papel=papel)
+                                    l2["updated_at"] = now_iso()
+                                    save_db()
+                                    conv = conv_novo
+                                    conectada = True
+                    except ChatwootErro as e:
+                        erro = str(e)
+                    except Exception as e:
+                        erro = "Não consegui conectar no Chatwoot (%s)" % type(e).__name__
+                if conv and not erro:
+                    try:
+                        enviada = chatwoot_envia_mensagem(base, acc, conv, token, texto)
+                        if not enviada:
+                            erro = "Não consegui enviar — recarregue e tente de novo"
+                    except urllib.error.HTTPError as e:
+                        erro = "O Chatwoot recusou o envio (HTTP %s)" % e.code
+                    except Exception as e:
+                        erro = "Não consegui falar com o Chatwoot (%s)" % type(e).__name__
+                if enviada:
+                    with _lock:
+                        l3 = next((l for l in _db["leads"] if l["id"] == lead_id), None)
+                        if l3:
+                            resumo = texto if len(texto) <= 200 else texto[:200] + "…"
+                            registra_hist(l3, autor, ['📤 Chatwoot: "%s"' % resumo],
+                                          papel=papel, tipo="contato")
+                            # quem manda mensagem espera resposta (menos lead encerrado)
+                            if l3.get("status") not in ("ganho", "perdido", "desistiu", "curioso") \
+                                    and not l3.get("aguardando_resposta"):
+                                l3["aguardando_resposta"] = now_iso()
+                            l3["updated_at"] = now_iso()
+                            save_db()
+            finally:
+                with _lock:
+                    _cw_em_voo.discard(lead_id)
+            if erro and not enviada:
+                return self.send_json(502, {"error": erro})
+            with _lock:
+                lead_atual = next((l for l in _db["leads"] if l["id"] == lead_id), None)
+            return self.send_json(200, {"ok": True, "enviada": enviada, "conectada": conectada,
+                                        "lead": lead_atual,
+                                        "conversa_url": chatwoot_conversa_url(base, acc, conv)})
+
         # Criar
         if path == "/api/leads" and method == "POST":
             try:

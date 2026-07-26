@@ -1522,6 +1522,12 @@ function openModal(lead) {
   const cwHref = chatwootConvUrl(lead);
   if (cwHref) cwEl.setAttribute('href', cwHref);
   else cwEl.removeAttribute('href');
+  // composer: mensagem direto pelo CRM (sai pelo Chatwoot). Vale também para
+  // lead encerrado (mensagem manual é deliberada — ex.: pós-venda).
+  const cwTemCanal = !!(settings.chatwoot_url && settings.chatwoot_account_id
+    && (lead.chatwoot_conversation_id || lead.telefone));
+  $('#cwComposer').hidden = isNew || !cwTemCanal;
+  $('#cwMsgTexto').value = ''; // rascunho é por-lead: limpa ao abrir outro
 
   // drones do pedido (lead antigo: cai no produto único; lead sem nada: 1 linha vazia)
   const itensIni = (lead.itens && lead.itens.length)
@@ -2692,6 +2698,43 @@ if (cwLeadEl) cwLeadEl.addEventListener('click', (e) => {
   if (!lead) { e.preventDefault(); return; }
   if (cwLeadEl.getAttribute('href')) atenderNoChatwoot(lead, true);
   else { e.preventDefault(); atenderNoChatwoot(lead); }
+});
+
+// mensagem escrita no CRM -> sai pelo Chatwoot (canal oficial), sem trocar de aba
+let cwMsgEnviando = false; // trava de reentrância (clique + Enter)
+async function enviarMensagemChatwoot() {
+  const id = form.id.value;
+  if (!id || cwMsgEnviando) return;
+  const inp = $('#cwMsgTexto');
+  const texto = (inp.value || '').trim();
+  if (!texto) { toast('Escreva a mensagem antes de enviar'); inp.focus(); return; }
+  cwMsgEnviando = true;
+  const btn = $('#cwMsgEnviar');
+  btn.disabled = true; inp.disabled = true; btn.textContent = 'Enviando…';
+  try {
+    const res = await api('/api/leads/' + encodeURIComponent(id) + '/chatwoot-mensagem', {
+      method: 'POST', body: JSON.stringify({ texto }),
+    });
+    inp.value = ''; // enviada com sucesso: limpa o campo
+    const lead = leadsCache.find((l) => l.id === id);
+    if (lead && res.lead) {
+      Object.assign(lead, res.lead);
+      renderHistorico(lead);
+      renderBoard();
+      loadStats();
+    }
+    toast(res.conectada ? '🔗 Conversa conectada + 📤 mensagem enviada!' : '📤 Mensagem enviada pelo Chatwoot');
+  } catch (err) {
+    toast(err.offline ? '📴 Sem internet — envie quando o sinal voltar (a mensagem ficou no campo)'
+                      : '⚠️ ' + err.message);
+  } finally {
+    cwMsgEnviando = false;
+    btn.disabled = false; inp.disabled = false; btn.textContent = '📤 Enviar';
+  }
+}
+$('#cwMsgEnviar').addEventListener('click', enviarMensagemChatwoot);
+$('#cwMsgTexto').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') { e.preventDefault(); enviarMensagemChatwoot(); }
 });
 form.regiao.addEventListener('input', (e) => renderCidadeBox(e.target.value));
 form.regiao.addEventListener('focus', (e) => renderCidadeBox(e.target.value));

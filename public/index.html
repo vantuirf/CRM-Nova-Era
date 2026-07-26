@@ -177,6 +177,12 @@
             <input name="email" type="email" placeholder="Ex.: produtor@email.com" required />
           </label>
 
+          <div class="full cw-composer" id="cwComposer" hidden>
+            <input id="cwMsgTexto" maxlength="2000" autocomplete="off"
+              placeholder="✍️ Mensagem para o cliente — sai pelo Chatwoot (canal oficial)…" />
+            <button type="button" id="cwMsgEnviar">📤 Enviar</button>
+          </div>
+
           <div class="section-title full">👤 Contato e decisão de compra</div>
           <label>Cargo de quem entrou em contato
             <input name="cargo" list="cargosList" placeholder="Ex.: Agrônomo, Gerente, Filho do dono…" autocomplete="off" />
