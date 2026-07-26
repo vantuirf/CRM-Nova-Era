@@ -1365,6 +1365,78 @@ def chatwoot_conectar(base, acc, token, inbox_id, nome, telefone):
         raise ChatwootErro("Não consegui criar a conversa no Chatwoot (%s)" % type(e).__name__)
 
 
+# Conexao EM LOTE dos leads da recuperacao (roda numa thread; o painel
+# acompanha o progresso). IMPORTANTE: o lote SO VINCULA as conversas — nao
+# envia nenhuma mensagem (disparo em massa derruba numero de WhatsApp).
+_conectar_lote = {"rodando": False, "total": 0, "feitos": 0, "conectados": 0,
+                  "ja_tinham": 0, "falhas": 0, "ultimo_erro": None, "terminado_em": None}
+
+
+def _roda_conectar_lote(base, acc, token, inbox):
+    st = _conectar_lote
+    erros_seguidos = 0
+    try:
+        with _lock:
+            ids = [l["id"] for l in _db["leads"]
+                   if l.get("recuperacao")
+                   and not conv_id_valido(l.get("chatwoot_conversation_id"))
+                   and len(norm_phone(l.get("telefone"))) >= 8]
+        st["total"] = len(ids)
+        alterados = 0
+        for lid in ids:
+            if not st["rodando"]:
+                break  # alguem pediu para parar
+            with _lock:
+                lead = next((l for l in _db["leads"] if l["id"] == lid), None)
+                if not lead or conv_id_valido(lead.get("chatwoot_conversation_id")):
+                    st["feitos"] += 1
+                    st["ja_tinham"] += 1
+                    continue
+                if lid in _cw_em_voo:  # clique manual em andamento: pula
+                    st["feitos"] += 1
+                    continue
+                _cw_em_voo.add(lid)
+                nome = str(lead.get("nome") or "")
+                tel = lead.get("telefone") or ""
+            try:
+                conv, contato = chatwoot_conectar(base, acc, token, inbox, nome, tel)
+                with _lock:
+                    l2 = next((l for l in _db["leads"] if l["id"] == lid), None)
+                    if l2 and not conv_id_valido(l2.get("chatwoot_conversation_id")):
+                        l2["chatwoot_conversation_id"] = conv
+                        if contato and not l2.get("chatwoot_contact_id"):
+                            l2["chatwoot_contact_id"] = contato
+                        registra_hist(l2, "Sistema", ["🔗 Conversa conectada no Chatwoot (lote da recuperação)"])
+                        l2["updated_at"] = now_iso()
+                        alterados += 1
+                        if alterados % 10 == 0:
+                            save_db()  # salva aos poucos (nao 320 gravacoes)
+                st["conectados"] += 1
+                erros_seguidos = 0
+            except ChatwootErro as e:
+                st["falhas"] += 1
+                st["ultimo_erro"] = str(e)
+                erros_seguidos += 1
+            except Exception as e:
+                st["falhas"] += 1
+                st["ultimo_erro"] = "Erro inesperado (%s)" % type(e).__name__
+                erros_seguidos += 1
+            finally:
+                with _lock:
+                    _cw_em_voo.discard(lid)
+                st["feitos"] += 1
+            if erros_seguidos >= 8:
+                st["ultimo_erro"] = (st["ultimo_erro"] or "falhas") + \
+                    " — lote interrompido: muitas falhas seguidas (confira a configuração e rode de novo)"
+                break
+            time.sleep(0.2)  # ritmo suave: nao metralhar o Chatwoot
+    finally:
+        with _lock:
+            save_db()
+        st["rodando"] = False
+        st["terminado_em"] = now_iso()
+
+
 # ---------------------------------------------------------------------------
 # Permissoes por papel
 # ---------------------------------------------------------------------------
@@ -2275,6 +2347,27 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json(200, {"url": url, "total_chatwoot": len(cw),
                                         "ultimo_lead": ultimo_lead,
                                         "ultimo_evento": _webhook_ultimo})
+
+        # Conectar TODOS os leads da recuperacao (lote, em segundo plano).
+        # POST inicia; GET acompanha o progresso. So vincula — nao manda mensagem.
+        if path == "/api/chatwoot/conectar-todos" and method == "GET":
+            if not gestor:
+                return self.send_json(403, {"error": "Disponível só para gerente/administrador"})
+            return self.send_json(200, dict(_conectar_lote))
+        if path == "/api/chatwoot/conectar-todos" and method == "POST":
+            if not gestor:
+                return self.send_json(403, {"error": "Disponível só para gerente/administrador"})
+            base, acc, token, _s = chatwoot_cfg()
+            if not (base and acc and token):
+                return self.send_json(400, {"error": "Configure o Chatwoot acima (endereço, conta e token) antes"})
+            inbox = str(_db.get("settings", {}).get("chatwoot_inbox_id") or "").strip()
+            with _lock:
+                if _conectar_lote["rodando"]:
+                    return self.send_json(200, dict(_conectar_lote, iniciado=False, ja_rodando=True))
+                _conectar_lote.update({"rodando": True, "total": 0, "feitos": 0, "conectados": 0,
+                                       "ja_tinham": 0, "falhas": 0, "ultimo_erro": None, "terminado_em": None})
+            threading.Thread(target=_roda_conectar_lote, args=(base, acc, token, inbox), daemon=True).start()
+            return self.send_json(200, {"iniciado": True})
 
         if path == "/api/chatwoot/teste" and method == "POST":
             if not gestor:

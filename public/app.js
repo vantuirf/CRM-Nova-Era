@@ -2634,7 +2634,51 @@ $('#btnRefresh').addEventListener('click', async () => {
 });
 $('#btnCampaigns').addEventListener('click', () => {
   renderCampaigns(); renderCampReport(); loadWebhookInfo();
+  acompanhaLote(); // se o lote de conexão estiver rodando, retoma o progresso
   $('#campBackdrop').hidden = false;
+});
+
+// Conectar TODOS os leads da Recuperação (lote em 2º plano no servidor).
+// SÓ vincula as conversas — não envia mensagem nenhuma (disparo em massa
+// derruba número de WhatsApp; a saudação continua individual).
+let lotePollTimer = null;
+function renderLoteStatus(st) {
+  const box = $('#loteStatus');
+  box.hidden = false;
+  if (st.rodando) {
+    box.className = 'cw-teste ok';
+    box.textContent = `🔗 Conectando… ${st.feitos} de ${st.total} — ${st.conectados} conectados`
+      + (st.falhas ? `, ${st.falhas} sem conexão` : '') + '. Pode fechar esta janela, o trabalho continua.';
+  } else if (st.terminado_em) {
+    box.className = st.falhas && !st.conectados ? 'cw-teste falha' : 'cw-teste ok';
+    box.textContent = `✅ Lote concluído: ${st.conectados} conectados`
+      + (st.ja_tinham ? ` · ${st.ja_tinham} já estavam` : '')
+      + (st.falhas ? ` · ${st.falhas} não conectaram${st.ultimo_erro ? ' (último motivo: ' + st.ultimo_erro + ')' : ''}` : '')
+      + '. Os leads conectados já mostram a conversa na ficha.';
+  } else {
+    box.hidden = true;
+  }
+}
+async function acompanhaLote() {
+  clearTimeout(lotePollTimer);
+  try {
+    const st = await api('/api/chatwoot/conectar-todos'); // GET = progresso
+    renderLoteStatus(st);
+    if (st.rodando) lotePollTimer = setTimeout(acompanhaLote, 2000);
+    else if (st.terminado_em) { loadStats(); loadLeads().catch(() => {}); }
+  } catch (_) { /* painel é gestor-only */ }
+}
+$('#btnConectarTodos').addEventListener('click', async () => {
+  if (!confirm('Conectar TODOS os leads da Recuperação ao Chatwoot?\n\n'
+    + '• O CRM vai procurar cada cliente pelo telefone e vincular a conversa antiga dele (ou criar uma nova).\n'
+    + '• NENHUMA mensagem será enviada — a saudação continua saindo só quando o vendedor clicar no lead.\n'
+    + '• Leva alguns minutos; dá pra acompanhar aqui no painel.')) return;
+  try {
+    const r = await api('/api/chatwoot/conectar-todos', { method: 'POST' });
+    if (r.ja_rodando) toast('O lote já está rodando — acompanhe abaixo');
+    else toast('🔗 Lote iniciado! Acompanhe o progresso abaixo');
+    acompanhaLote();
+  } catch (err) { toast('⚠️ ' + err.message); }
 });
 
 // a "ponte" Chatwoot -> CRM: mostra o endereço do webhook e se está entregando
