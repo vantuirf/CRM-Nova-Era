@@ -1186,6 +1186,53 @@ def chatwoot_envia_mensagem(base, acc, conv, token, content):
         return 200 <= getattr(resp, "status", 200) < 300
 
 
+ANEXO_MAX_BYTES = 10 * 1024 * 1024  # 10 MB por anexo (audio/imagem/video)
+ANEXO_MIMES = {
+    "image/jpeg", "image/png", "image/webp", "image/gif",
+    "audio/webm", "audio/ogg", "audio/mpeg", "audio/mp4", "audio/aac", "audio/wav", "audio/x-m4a",
+    "video/mp4", "video/webm", "video/quicktime", "video/3gpp",
+}
+
+
+def chatwoot_envia_anexo(base, acc, conv, token, content, nome, mime, dados):
+    """Envia uma mensagem OUTGOING com ANEXO (multipart) na conversa do
+    Chatwoot. content e opcional (legenda). Levanta excecao em erro."""
+    conv = conv_id_valido(conv)
+    if not conv:
+        return False
+    fronteira = "----cwanexo" + secrets.token_hex(12)
+    partes = []
+    campos = {"message_type": "outgoing", "private": "false"}
+    if content:
+        campos["content"] = content
+    for k, v in campos.items():
+        partes.append(("--%s\r\nContent-Disposition: form-data; name=\"%s\"\r\n\r\n%s\r\n"
+                       % (fronteira, k, v)).encode("utf-8"))
+    nome_seguro = re.sub(r"[^A-Za-z0-9._-]", "_", str(nome or "arquivo"))[:80] or "arquivo"
+    partes.append(("--%s\r\nContent-Disposition: form-data; name=\"attachments[]\"; "
+                   "filename=\"%s\"\r\nContent-Type: %s\r\n\r\n"
+                   % (fronteira, nome_seguro, mime)).encode("utf-8"))
+    partes.append(dados)
+    partes.append(("\r\n--%s--\r\n" % fronteira).encode("utf-8"))
+    corpo = b"".join(partes)
+    url = "%s/api/v1/accounts/%s/conversations/%s/messages" % (base, acc, conv)
+    cab = chatwoot_headers(token)
+    cab["Content-Type"] = "multipart/form-data; boundary=%s" % fronteira
+    req = urllib.request.Request(url, data=corpo, method="POST", headers=cab)
+    with _ABRIDOR_SEM_REDIRECT.open(req, timeout=60) as resp:  # upload pode demorar
+        return 200 <= getattr(resp, "status", 200) < 300
+
+
+def _cw_data_msg(ts):
+    """created_at do Chatwoot vem como unix (int) ou ISO — normaliza p/ ISO."""
+    if ts in (None, ""):
+        return None
+    try:
+        return datetime.fromtimestamp(int(ts), tz=timezone.utc).isoformat()
+    except (TypeError, ValueError, OSError):
+        return str(ts)
+
+
 def _cw_req(base, caminho, token, corpo=None):
     """GET/POST na API do Chatwoot; devolve o JSON da resposta (dict/list).
     corpo=None -> GET. Levanta excecao em erro (o chamador traduz)."""
@@ -2833,6 +2880,55 @@ class Handler(BaseHTTPRequestHandler):
                                         "configurado": configurado, "lead": lead_atual,
                                         "chatwoot_url": base, "chatwoot_account_id": acc})
 
+        # Conversa do Chatwoot dentro do CRM (leitura): as mensagens do cliente
+        # e da equipe, com anexos. O token NUNCA vai ao navegador — o CRM busca
+        # e devolve so os campos mapeados.
+        mchat = re.match(r"^/api/leads/([^/]+)/chatwoot-chat$", path)
+        if mchat and method == "GET":
+            base, acc, token, _s = chatwoot_cfg()
+            if not (base and acc and token):
+                return self.send_json(400, {"error": "Chatwoot não configurado"})
+            with _lock:
+                lead = next((l for l in _db["leads"] if l["id"] == mchat.group(1)), None)
+                if not lead or not pode_ver_lead(user, lead):
+                    return self.send_json(404, {"error": "Lead nao encontrado"})
+                conv = conv_id_valido(lead.get("chatwoot_conversation_id"))
+            if not conv:
+                return self.send_json(200, {"mensagens": [], "sem_conversa": True})
+            try:
+                res = _cw_req(base, "/api/v1/accounts/%s/conversations/%s/messages" % (acc, conv), token)
+            except urllib.error.HTTPError as e:
+                return self.send_json(502, {"error": "O Chatwoot recusou (HTTP %s)" % e.code})
+            except Exception as e:
+                return self.send_json(502, {"error": "Não consegui falar com o Chatwoot (%s)" % type(e).__name__})
+            itens = _cw_payload(res)
+            mensagens = []
+            if isinstance(itens, list):
+                for m in itens:
+                    if not isinstance(m, dict) or m.get("private"):
+                        continue
+                    mt = m.get("message_type")
+                    if mt not in (0, 1, "incoming", "outgoing"):
+                        continue  # 2 = atividade do sistema (resolvida, etiqueta...) — fora
+                    anexos = []
+                    for a in (m.get("attachments") or []):
+                        if isinstance(a, dict) and a.get("data_url"):
+                            anexos.append({"tipo": str(a.get("file_type") or "file"),
+                                           "url": str(a.get("data_url"))})
+                    texto = str(m.get("content") or "").strip()
+                    if not texto and not anexos:
+                        continue
+                    snd = m.get("sender") if isinstance(m.get("sender"), dict) else {}
+                    mensagens.append({
+                        "de": "cliente" if mt in (0, "incoming") else "equipe",
+                        "texto": texto[:4000],
+                        "anexos": anexos[:5],
+                        "autor": str(snd.get("name") or snd.get("available_name") or "")[:60],
+                        "data": _cw_data_msg(m.get("created_at")),
+                    })
+            mensagens.sort(key=lambda x: str(x.get("data") or ""))
+            return self.send_json(200, {"mensagens": mensagens[-100:]})
+
         # Mensagem escrita NO CRM e enviada pelo Chatwoot (canal oficial). Se o
         # lead ainda nao tem conversa, conecta primeiro (mesmo fluxo do botao).
         # Mensagem manual e deliberada: vale tambem para lead encerrado (pos-venda).
@@ -2844,7 +2940,23 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:
                 return self.send_json(400, {"error": "Corpo invalido"})
             texto = str(body.get("texto") or "").strip()[:2000]
-            if not texto:
+            # anexo opcional: {nome, mime, dados(base64)} — imagem/audio/video
+            anexo = body.get("anexo") if isinstance(body.get("anexo"), dict) else None
+            anexo_bytes, anexo_nome, anexo_mime = None, "", ""
+            if anexo:
+                anexo_mime = str(anexo.get("mime") or "").lower().split(";")[0].strip()
+                anexo_nome = str(anexo.get("nome") or "arquivo")
+                if anexo_mime not in ANEXO_MIMES:
+                    return self.send_json(400, {"error": "Tipo de arquivo não aceito — envie imagem, áudio ou vídeo"})
+                try:
+                    anexo_bytes = base64.b64decode(str(anexo.get("dados") or ""), validate=True)
+                except Exception:
+                    return self.send_json(400, {"error": "Arquivo inválido — tente anexar de novo"})
+                if not anexo_bytes:
+                    return self.send_json(400, {"error": "Arquivo vazio — tente anexar de novo"})
+                if len(anexo_bytes) > ANEXO_MAX_BYTES:
+                    return self.send_json(400, {"error": "Arquivo muito grande — o limite é 10 MB"})
+            if not texto and not anexo_bytes:
                 return self.send_json(400, {"error": "Escreva a mensagem antes de enviar"})
             base, acc, token, _saud = chatwoot_cfg()
             if not (base and acc and token):
@@ -2889,7 +3001,11 @@ class Handler(BaseHTTPRequestHandler):
                         erro = "Não consegui conectar no Chatwoot (%s)" % type(e).__name__
                 if conv and not erro:
                     try:
-                        enviada = chatwoot_envia_mensagem(base, acc, conv, token, texto)
+                        if anexo_bytes:
+                            enviada = chatwoot_envia_anexo(base, acc, conv, token, texto,
+                                                           anexo_nome, anexo_mime, anexo_bytes)
+                        else:
+                            enviada = chatwoot_envia_mensagem(base, acc, conv, token, texto)
                         if not enviada:
                             erro = "Não consegui enviar — recarregue e tente de novo"
                     except urllib.error.HTTPError as e:
@@ -2900,9 +3016,18 @@ class Handler(BaseHTTPRequestHandler):
                     with _lock:
                         l3 = next((l for l in _db["leads"] if l["id"] == lead_id), None)
                         if l3:
+                            if anexo_mime.startswith("image/"):
+                                rotulo = "🖼 imagem"
+                            elif anexo_mime.startswith("audio/"):
+                                rotulo = "🎤 áudio"
+                            elif anexo_mime.startswith("video/"):
+                                rotulo = "🎬 vídeo"
+                            else:
+                                rotulo = ""
                             resumo = texto if len(texto) <= 200 else texto[:200] + "…"
-                            registra_hist(l3, autor, ['📤 Chatwoot: "%s"' % resumo],
-                                          papel=papel, tipo="contato")
+                            item = '📤 Chatwoot: %s%s' % (rotulo, (' "%s"' % resumo) if resumo else "") \
+                                if rotulo else ('📤 Chatwoot: "%s"' % resumo)
+                            registra_hist(l3, autor, [item], papel=papel, tipo="contato")
                             # quem manda mensagem espera resposta (menos lead encerrado)
                             if l3.get("status") not in ("ganho", "perdido", "desistiu", "curioso") \
                                     and not l3.get("aguardando_resposta"):

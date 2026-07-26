@@ -1522,12 +1522,16 @@ function openModal(lead) {
   const cwHref = chatwootConvUrl(lead);
   if (cwHref) cwEl.setAttribute('href', cwHref);
   else cwEl.removeAttribute('href');
-  // composer: mensagem direto pelo CRM (sai pelo Chatwoot). Vale também para
-  // lead encerrado (mensagem manual é deliberada — ex.: pós-venda).
+  // painel 💬 Conversa (Chatwoot): ver o que o cliente mandou e responder
+  // (texto/imagem/áudio/vídeo) sem sair do CRM. Vale também para lead
+  // encerrado (mensagem manual é deliberada — ex.: pós-venda).
   const cwTemCanal = !!(settings.chatwoot_url && settings.chatwoot_account_id
     && (lead.chatwoot_conversation_id || lead.telefone));
-  $('#cwComposer').hidden = isNew || !cwTemCanal;
+  $('#chatPanel').hidden = isNew || !cwTemCanal;
   $('#cwMsgTexto').value = ''; // rascunho é por-lead: limpa ao abrir outro
+  limpaChatAnexo();
+  if (!isNew && cwTemCanal) carregarChatChatwoot(lead.id);
+  else $('#chatMsgs').innerHTML = '';
 
   // drones do pedido (lead antigo: cai no produto único; lead sem nada: 1 linha vazia)
   const itensIni = (lead.itens && lead.itens.length)
@@ -2700,6 +2704,151 @@ if (cwLeadEl) cwLeadEl.addEventListener('click', (e) => {
   else { e.preventDefault(); atenderNoChatwoot(lead); }
 });
 
+// ---- 💬 Conversa (Chatwoot) dentro do CRM: ler + responder com anexos ----
+let chatCarregando = false;
+async function carregarChatChatwoot(id, silencioso) {
+  if (chatCarregando) return;
+  chatCarregando = true;
+  try {
+    const res = await api('/api/leads/' + encodeURIComponent(id) + '/chatwoot-chat');
+    if (form.id.value !== id) return; // usuário já abriu outro lead
+    renderChat(res.mensagens || [], res.sem_conversa);
+  } catch (err) {
+    if (!silencioso && form.id.value === id) {
+      const box = $('#chatMsgs');
+      box.innerHTML = '';
+      box.append(el('div', 'chat-vazio', '⚠️ ' + (err.message || 'Não consegui carregar a conversa')));
+    }
+  } finally { chatCarregando = false; }
+}
+
+function renderChat(msgs, semConversa) {
+  const box = $('#chatMsgs');
+  box.innerHTML = '';
+  if (semConversa) {
+    box.append(el('div', 'chat-vazio', 'Ainda sem conversa no Chatwoot — a primeira mensagem que você enviar já conecta.'));
+    return;
+  }
+  if (!msgs.length) {
+    box.append(el('div', 'chat-vazio', 'Sem mensagens ainda.'));
+    return;
+  }
+  for (const m of msgs) {
+    const b = el('div', 'chat-msg ' + (m.de === 'cliente' ? 'cliente' : 'equipe'));
+    for (const a of (m.anexos || [])) {
+      if (a.tipo === 'image') {
+        const img = document.createElement('img');
+        img.className = 'chat-img'; img.src = a.url; img.loading = 'lazy';
+        img.onclick = () => window.open(a.url, '_blank', 'noopener');
+        b.append(img);
+      } else if (a.tipo === 'audio') {
+        const au = document.createElement('audio');
+        au.controls = true; au.src = a.url; au.className = 'chat-audio';
+        b.append(au);
+      } else if (a.tipo === 'video') {
+        const vi = document.createElement('video');
+        vi.controls = true; vi.src = a.url; vi.className = 'chat-video';
+        b.append(vi);
+      } else {
+        const l = document.createElement('a');
+        l.href = a.url; l.target = '_blank'; l.rel = 'noopener';
+        l.className = 'chat-arquivo'; l.textContent = '📎 arquivo';
+        b.append(l);
+      }
+    }
+    if (m.texto) b.append(el('div', 'chat-texto', m.texto));
+    b.append(el('div', 'chat-meta',
+      (m.de === 'cliente' ? '👤 Cliente' : (m.autor || 'Equipe')) + ' · ' + dataHora(m.data, true)));
+    box.append(b);
+  }
+  box.scrollTop = box.scrollHeight; // desce até a mensagem mais recente
+}
+
+// anexo pendente do composer: {nome, mime, dados(base64 sem prefixo)}
+let chatAnexo = null;
+function limpaChatAnexo() {
+  chatAnexo = null;
+  const pv = $('#chatAnexoPrev');
+  if (pv) { pv.hidden = true; pv.innerHTML = ''; }
+}
+function mostraChatAnexo(rotulo) {
+  const pv = $('#chatAnexoPrev');
+  pv.innerHTML = '';
+  pv.append(el('span', 'chat-anexo-nome', rotulo));
+  const x = el('button', 'chip-x', '✕');
+  x.type = 'button'; x.title = 'Remover anexo';
+  x.onclick = limpaChatAnexo;
+  pv.append(x);
+  pv.hidden = false;
+}
+function dataUrlParaAnexo(dataUrl, nome) {
+  const m = /^data:([^;]+);base64,(.*)$/.exec(dataUrl || '');
+  if (!m) return null;
+  return { nome, mime: m[1], dados: m[2] };
+}
+
+$('#chatAnexar').addEventListener('click', () => $('#chatArquivo').click());
+$('#chatArquivo').addEventListener('change', async (e) => {
+  const file = e.target.files[0];
+  e.target.value = ''; // permite escolher o mesmo arquivo de novo
+  if (!file) return;
+  try {
+    if (file.type.startsWith('image/')) {
+      // foto: comprime igual às fotos de visita (envio leve no 3G da fazenda)
+      const dataUrl = await resizeImagem(file, 1600, 0.8);
+      chatAnexo = dataUrlParaAnexo(dataUrl, (file.name || 'foto').replace(/\.[^.]+$/, '') + '.jpg');
+      mostraChatAnexo('🖼 ' + (file.name || 'imagem'));
+    } else {
+      if (file.size > 10 * 1024 * 1024) { toast('Arquivo muito grande — o limite é 10 MB'); return; }
+      const dataUrl = await new Promise((res, rej) => {
+        const r = new FileReader();
+        r.onload = () => res(r.result); r.onerror = () => rej(new Error('falha ao ler'));
+        r.readAsDataURL(file);
+      });
+      chatAnexo = dataUrlParaAnexo(dataUrl, file.name || 'arquivo');
+      if (!chatAnexo) { toast('Não consegui ler o arquivo'); return; }
+      mostraChatAnexo((file.type.startsWith('video/') ? '🎬 ' : file.type.startsWith('audio/') ? '🎤 ' : '📎 ') + (file.name || 'arquivo'));
+    }
+  } catch (err) { toast('Erro no arquivo: ' + err.message); }
+});
+
+// gravação de áudio (🎤): um clique grava, outro para e anexa
+let chatGravador = null;
+$('#chatGravar').addEventListener('click', async () => {
+  const btn = $('#chatGravar');
+  if (chatGravador) { // parando
+    chatGravador.stop();
+    return;
+  }
+  if (!navigator.mediaDevices || !window.MediaRecorder) {
+    toast('Este navegador não grava áudio — anexe um arquivo de áudio pelo 📎');
+    return;
+  }
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const pedacos = [];
+    const rec = new MediaRecorder(stream);
+    rec.ondataavailable = (e) => { if (e.data && e.data.size) pedacos.push(e.data); };
+    rec.onstop = async () => {
+      stream.getTracks().forEach((t) => t.stop());
+      chatGravador = null;
+      btn.classList.remove('gravando'); btn.textContent = '🎤';
+      const blob = new Blob(pedacos, { type: rec.mimeType || 'audio/webm' });
+      if (!blob.size) { toast('Gravação vazia — tente de novo'); return; }
+      if (blob.size > 10 * 1024 * 1024) { toast('Áudio muito longo — o limite é 10 MB'); return; }
+      const dataUrl = await new Promise((res) => { const r = new FileReader(); r.onload = () => res(r.result); r.readAsDataURL(blob); });
+      chatAnexo = dataUrlParaAnexo(dataUrl, 'audio-' + Date.now() + '.webm');
+      if (chatAnexo) mostraChatAnexo('🎤 áudio gravado (' + Math.round(blob.size / 1024) + ' KB)');
+    };
+    rec.start();
+    chatGravador = rec;
+    btn.classList.add('gravando'); btn.textContent = '⏹';
+    toast('🎤 Gravando… clique em ⏹ para parar');
+  } catch (_) {
+    toast('🎤 Permita o acesso ao microfone para gravar');
+  }
+});
+
 // mensagem escrita no CRM -> sai pelo Chatwoot (canal oficial), sem trocar de aba
 let cwMsgEnviando = false; // trava de reentrância (clique + Enter)
 async function enviarMensagemChatwoot() {
@@ -2707,15 +2856,18 @@ async function enviarMensagemChatwoot() {
   if (!id || cwMsgEnviando) return;
   const inp = $('#cwMsgTexto');
   const texto = (inp.value || '').trim();
-  if (!texto) { toast('Escreva a mensagem antes de enviar'); inp.focus(); return; }
+  if (!texto && !chatAnexo) { toast('Escreva a mensagem (ou anexe algo) antes de enviar'); inp.focus(); return; }
   cwMsgEnviando = true;
   const btn = $('#cwMsgEnviar');
-  btn.disabled = true; inp.disabled = true; btn.textContent = 'Enviando…';
+  btn.disabled = true; inp.disabled = true; btn.textContent = '…';
   try {
+    const corpo = { texto };
+    if (chatAnexo) corpo.anexo = chatAnexo;
     const res = await api('/api/leads/' + encodeURIComponent(id) + '/chatwoot-mensagem', {
-      method: 'POST', body: JSON.stringify({ texto }),
+      method: 'POST', body: JSON.stringify(corpo),
     });
     inp.value = ''; // enviada com sucesso: limpa o campo
+    limpaChatAnexo();
     const lead = leadsCache.find((l) => l.id === id);
     if (lead && res.lead) {
       Object.assign(lead, res.lead);
@@ -2723,19 +2875,21 @@ async function enviarMensagemChatwoot() {
       renderBoard();
       loadStats();
     }
-    toast(res.conectada ? '🔗 Conversa conectada + 📤 mensagem enviada!' : '📤 Mensagem enviada pelo Chatwoot');
+    toast(res.conectada ? '🔗 Conversa conectada + 📤 mensagem enviada!' : '📤 Enviada pelo Chatwoot');
+    carregarChatChatwoot(id, true); // a mensagem aparece na conversa
   } catch (err) {
     toast(err.offline ? '📴 Sem internet — envie quando o sinal voltar (a mensagem ficou no campo)'
                       : '⚠️ ' + err.message);
   } finally {
     cwMsgEnviando = false;
-    btn.disabled = false; inp.disabled = false; btn.textContent = '📤 Enviar';
+    btn.disabled = false; inp.disabled = false; btn.textContent = '📤';
   }
 }
 $('#cwMsgEnviar').addEventListener('click', enviarMensagemChatwoot);
 $('#cwMsgTexto').addEventListener('keydown', (e) => {
   if (e.key === 'Enter') { e.preventDefault(); enviarMensagemChatwoot(); }
 });
+$('#chatRefresh').addEventListener('click', () => { if (form.id.value) carregarChatChatwoot(form.id.value); });
 form.regiao.addEventListener('input', (e) => renderCidadeBox(e.target.value));
 form.regiao.addEventListener('focus', (e) => renderCidadeBox(e.target.value));
 form.regiao.addEventListener('blur', () => setTimeout(() => { $('#cidadesBox').hidden = true; }, 150));
@@ -2982,7 +3136,11 @@ setInterval(async () => {
   api('/api/heartbeat').catch(() => {});
   // painel de equipe aberto → atualiza online + atividade ao vivo
   if (!$('#teamActBackdrop').hidden) { carregarTeamActivity(); return; }
-  if (!$('#modalBackdrop').hidden) return;
+  if (!$('#modalBackdrop').hidden) {
+    // ficha aberta: atualiza SÓ a conversa (a resposta do cliente aparece ao vivo)
+    if (!$('#chatPanel').hidden && form.id.value) carregarChatChatwoot(form.id.value, true);
+    return;
+  }
   // com a janela de ação em massa aberta, a lista não pode mudar embaixo do
   // usuário: o que ele confirmou tem que ser o que será alterado
   if (!$('#bulkBackdrop').hidden) return;

@@ -177,12 +177,6 @@
             <input name="email" type="email" placeholder="Ex.: produtor@email.com" required />
           </label>
 
-          <div class="full cw-composer" id="cwComposer" hidden>
-            <input id="cwMsgTexto" maxlength="2000" autocomplete="off"
-              placeholder="✍️ Mensagem para o cliente — sai pelo Chatwoot (canal oficial)…" />
-            <button type="button" id="cwMsgEnviar">📤 Enviar</button>
-          </div>
-
           <div class="section-title full">👤 Contato e decisão de compra</div>
           <label>Cargo de quem entrou em contato
             <input name="cargo" list="cargosList" placeholder="Ex.: Agrônomo, Gerente, Filho do dono…" autocomplete="off" />
@@ -311,6 +305,20 @@
         <button class="hist-nota-btn" id="histNotaBtn" type="button">Adicionar</button>
       </div>
       <div class="hist-timeline" id="histTimeline"></div>
+    </aside>
+    <aside class="hist-panel chat-panel" id="chatPanel" hidden>
+      <div class="hist-head chat-head">💬 Conversa (Chatwoot)
+        <button type="button" class="icon-btn" id="chatRefresh" title="Atualizar a conversa">↻</button>
+      </div>
+      <div class="chat-msgs" id="chatMsgs"><!-- bolhas via JS --></div>
+      <div class="chat-anexo-prev" id="chatAnexoPrev" hidden><!-- prévia do anexo --></div>
+      <div class="chat-composer">
+        <button type="button" class="chat-ico" id="chatAnexar" title="Enviar imagem ou vídeo">📎</button>
+        <input type="file" id="chatArquivo" accept="image/*,video/*,audio/*" hidden />
+        <button type="button" class="chat-ico" id="chatGravar" title="Gravar áudio">🎤</button>
+        <input id="cwMsgTexto" maxlength="2000" autocomplete="off" placeholder="Mensagem para o cliente…" />
+        <button type="button" id="cwMsgEnviar" title="Enviar pelo canal oficial">📤</button>
+      </div>
     </aside>
     </div>
   </div>
