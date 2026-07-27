@@ -1448,6 +1448,17 @@ def no_funil_vendas(lead):
         lead.get("status") in ("perdido", "desistiu") and bool(lead.get("tipo")))
 
 
+def em_fase_sdr(lead):
+    """Lead ainda na triagem (o territorio do SDR)."""
+    return lead.get("status") in ("novo", "triagem", "curioso") or (
+        lead.get("status") == "perdido" and not lead.get("tipo"))
+
+
+# Etapas que sao TRABALHO DE VENDEDOR — um SDR nao pode mover um lead para ca
+# (o SDR vai ate a qualificacao; dali em diante e venda).
+ETAPAS_DE_VENDA = ("decidindo", "negociacao", "proposta", "financiamento", "ganho")
+
+
 def pode_ver_lead(user, lead):
     p = user.get("papel")
     if p in ("admin", "gerente"):
@@ -1455,6 +1466,9 @@ def pode_ver_lead(user, lead):
     if p == "sdr":
         return lead.get("sdr") == user.get("nome")
     if p == "vendedor":
+        # vendedor faz TAMBEM o servico do SDR: ve toda a fase de triagem
+        if em_fase_sdr(lead):
+            return True
         dono = str(lead.get("vendedor") or "").strip()
         return no_funil_vendas(lead) and dono in ("", user.get("nome"))
     return False
@@ -2165,10 +2179,12 @@ class Handler(BaseHTTPRequestHandler):
                 # Recuperacao so conta/aparece para quem tem acesso liberado.
                 pode_rec = pode_recuperacao(user)
                 n_recuperacao = sum(1 for l in todos_visiveis if l.get("recuperacao")) if pode_rec else 0
-                n_servicos = sum(1 for l in todos_visiveis if l.get("em_servicos"))
+                n_servicos = sum(1 for l in todos_visiveis if l.get("em_servicos")) \
+                    if user["papel"] != "sdr" else 0
                 n_atuais = sum(1 for l in todos_visiveis if not l.get("recuperacao"))
                 if escopo == "servicos":
-                    visiveis = [l for l in todos_visiveis if l.get("em_servicos")]
+                    visiveis = [l for l in todos_visiveis if l.get("em_servicos")] \
+                        if user["papel"] != "sdr" else []
                 elif escopo == "recuperacao":
                     visiveis = [l for l in todos_visiveis if l.get("recuperacao")] if pode_rec else []
                 else:
@@ -2609,7 +2625,8 @@ class Handler(BaseHTTPRequestHandler):
             # separa os lotes: recuperacao (antigos), servicos (pos-venda, em
             # paralelo) e atuais (funil de drones dos leads novos).
             if escopo == "servicos":
-                leads = [l for l in leads if l.get("em_servicos")]
+                # painel de Servicos e trabalho de vendedor — SDR nao acessa
+                leads = [l for l in leads if l.get("em_servicos")] if user["papel"] != "sdr" else []
             elif escopo == "recuperacao":
                 # só quem tem acesso liberado vê a Recuperação
                 leads = [l for l in leads if l.get("recuperacao")] if pode_recuperacao(user) else []
@@ -2746,6 +2763,8 @@ class Handler(BaseHTTPRequestHandler):
         mv = re.match(r"^/api/leads/([^/]+)/visitas(?:/([^/]+))?$", path)
         if mv:
             lead_id, visita_id = mv.group(1), mv.group(2)
+            if user["papel"] == "sdr" and method == "POST":
+                return self.send_json(403, {"error": "Registrar visita é trabalho do vendedor"})
             if method == "POST" and not visita_id:
                 try:
                     body = self.read_body()
@@ -3213,6 +3232,12 @@ class Handler(BaseHTTPRequestHandler):
                     # Regras por papel: cada um so mexe no que e seu
                     if user["papel"] == "sdr" and "sdr" in body and body["sdr"] != user["nome"]:
                         return self.send_json(403, {"error": "SDR não pode transferir o lead para outro SDR"})
+                    # SDR nao faz trabalho de vendedor: nem etapas de venda,
+                    # nem o painel de Servicos (pos-venda)
+                    if user["papel"] == "sdr" and body.get("status") in ETAPAS_DE_VENDA:
+                        return self.send_json(403, {"error": "Etapas de venda são trabalho dos vendedores — o SDR vai até a qualificação"})
+                    if user["papel"] == "sdr" and (body.get("em_servicos") or body.get("status_servico")):
+                        return self.send_json(403, {"error": "O painel de Serviços é trabalho dos vendedores"})
                     if user["papel"] == "vendedor" and "vendedor" in body and body["vendedor"] not in ("", user["nome"]):
                         return self.send_json(403, {"error": "Vendedor só pode assumir o lead para si"})
                     # aplica numa copia: se uma regra barrar no meio, o lead

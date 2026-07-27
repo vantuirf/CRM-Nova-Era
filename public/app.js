@@ -3309,10 +3309,20 @@ function applyRoleUI() {
     aviso.hidden = false;
     aviso.onclick = () => { renderTeam(); $('#teamBackdrop').hidden = false; };
   }
-  // vendedor não tem nada no funil SDR; entra direto na aba de Produtores
+  // VENDEDOR faz tudo que o SDR faz: vê o funil SDR (triagem/qualificação)
+  // além dos funis de venda. Entra na aba principal dele (Produtores).
   if (me.papel === 'vendedor') {
-    $('#tabSDR').hidden = true;
+    $('#tabSDR').hidden = false;
     setView('produtor');
+  }
+  // SDR fica SÓ na triagem: as abas de venda e o painel de Serviços somem
+  // (o servidor também bloqueia — aqui é só a interface acompanhar)
+  if (me.papel === 'sdr') {
+    $('#tabProdutor').hidden = true;
+    $('#tabPecuarista').hidden = true;
+    $('#tabPrestador').hidden = true;
+    $('#escServ').hidden = true;
+    setView('sdr');
   }
 }
 
