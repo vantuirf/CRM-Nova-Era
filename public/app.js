@@ -1530,8 +1530,14 @@ function openModal(lead) {
   $('#chatPanel').hidden = isNew || !cwTemCanal;
   $('#cwMsgTexto').value = ''; // rascunho é por-lead: limpa ao abrir outro
   limpaChatAnexo();
-  if (!isNew && cwTemCanal) carregarChatChatwoot(lead.id);
-  else $('#chatMsgs').innerHTML = '';
+  // limpa JÁ a conversa do lead anterior (não pode ficar na tela nem por um
+  // segundo — parece a conversa errada) e mostra o estado de carregamento
+  const chatBox = $('#chatMsgs');
+  chatBox.innerHTML = '';
+  if (!isNew && cwTemCanal) {
+    chatBox.append(el('div', 'chat-vazio', '⏳ Carregando a conversa…'));
+    carregarChatChatwoot(lead.id);
+  }
 
   // drones do pedido (lead antigo: cai no produto único; lead sem nada: 1 linha vazia)
   const itensIni = (lead.itens && lead.itens.length)
@@ -2784,21 +2790,23 @@ if (cwLeadEl) cwLeadEl.addEventListener('click', (e) => {
 });
 
 // ---- 💬 Conversa (Chatwoot) dentro do CRM: ler + responder com anexos ----
-let chatCarregando = false;
+// Cada chamada ganha um número de sequência: só a resposta MAIS RECENTE do
+// lead ATUAL renderiza. (Antes, trocar de lead rápido deixava a conversa do
+// lead anterior na tela por até 15s — parecia a conversa errada.)
+let chatReqSeq = 0;
 async function carregarChatChatwoot(id, silencioso) {
-  if (chatCarregando) return;
-  chatCarregando = true;
+  const seq = ++chatReqSeq;
   try {
     const res = await api('/api/leads/' + encodeURIComponent(id) + '/chatwoot-chat');
-    if (form.id.value !== id) return; // usuário já abriu outro lead
+    if (seq !== chatReqSeq || form.id.value !== id) return; // já abriu outro lead
     renderChat(res.mensagens || [], res.sem_conversa);
   } catch (err) {
-    if (!silencioso && form.id.value === id) {
+    if (!silencioso && seq === chatReqSeq && form.id.value === id) {
       const box = $('#chatMsgs');
       box.innerHTML = '';
       box.append(el('div', 'chat-vazio', '⚠️ ' + (err.message || 'Não consegui carregar a conversa')));
     }
-  } finally { chatCarregando = false; }
+  }
 }
 
 function renderChat(msgs, semConversa) {
