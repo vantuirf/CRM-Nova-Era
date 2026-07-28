@@ -21,6 +21,7 @@ import re
 import base64
 import hashlib
 import secrets
+import shutil
 import threading
 import time
 import unicodedata
@@ -171,6 +172,13 @@ _lock = threading.Lock()
 # leads com envio de saudacao (Chatwoot) em andamento — trava de duplo-clique
 _cw_em_voo = set()
 _webhook_ultimo = None  # ultimo evento recebido do Chatwoot (desde o boot)
+
+# Trava de forca-bruta no login: depois de muitas senhas erradas seguidas para
+# um MESMO login, bloqueia novas tentativas por um tempo (chave = login, para
+# valer mesmo que o atacante troque de IP).
+LOGIN_MAX_FALHAS = 10
+LOGIN_BLOQUEIO_S = int(os.environ.get("LOGIN_BLOQUEIO_S") or 600)  # 10 min
+_login_falhas = {}  # login -> {"n": tentativas seguidas, "ate": bloqueado ate (epoch)}
 # presenca "online": user_id -> ultima vez visto (ISO). So em memoria (efemero,
 # nao vai pro disco); atualizado a cada requisicao autenticada.
 _online = {}
@@ -1870,11 +1878,30 @@ class Handler(BaseHTTPRequestHandler):
         pass  # silencioso (evita poluir o terminal com cada request)
 
     # -- helpers de resposta --
+    def headers_seguranca(self):
+        """Cabecalhos de protecao do navegador, em TODA resposta:
+        - nosniff: nada de adivinhar tipo de arquivo (bloqueia truques de upload)
+        - X-Frame/frame-ancestors: o CRM nao pode ser embutido em site alheio
+          (anti-clickjacking)
+        - CSP: so scripts/estilos do proprio CRM rodam; imagens/midia tambem de
+          https (fotos e audios do Chatwoot). Em localhost libera http (dev)."""
+        host = (self.headers.get("Host") or "").split(":")[0]
+        midia = "'self' data: blob: https:" + (" http:" if host in ("localhost", "127.0.0.1") else "")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Referrer-Policy", "same-origin")
+        self.send_header("Content-Security-Policy",
+                         "default-src 'self'; script-src 'self' 'unsafe-inline'; "
+                         "style-src 'self' 'unsafe-inline'; img-src %s; media-src %s; "
+                         "connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; "
+                         "form-action 'self'" % (midia, midia))
+
     def send_json(self, status, obj, headers=None):
         body = json.dumps(obj, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
+        self.headers_seguranca()
         for k, v in (headers or {}).items():
             self.send_header(k, v)
         self.end_headers()
@@ -1982,7 +2009,15 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(400, {"error": "Corpo invalido"})
             login = str(body.get("login") or "").strip().lower()
             senha = str(body.get("senha") or "")
+            agora_t = time.time()
             with _lock:
+                # forca-bruta: login bloqueado por excesso de tentativas?
+                reg = _login_falhas.get(login)
+                if reg and reg.get("ate", 0) > agora_t:
+                    espera = int((reg["ate"] - agora_t) / 60) + 1
+                    return self.send_json(429, {"error":
+                        "Muitas tentativas — este login está travado por %d minuto(s). "
+                        "Tente de novo depois." % espera})
                 u = next((x for x in _db["users"] if x.get("login") == login and x.get("ativo", True)), None)
             # A verificacao PBKDF2 e o atraso ocorrem FORA do lock (senao logins
             # errados em rajada congelariam o CRM inteiro). Quando o login nao
@@ -1990,12 +2025,27 @@ class Handler(BaseHTTPRequestHandler):
             # denunciar quais logins sao validos.
             if u and verifica_senha(u, senha):
                 with _lock:
+                    _login_falhas.pop(login, None)  # acertou: zera o contador
+                    # limpeza: sessoes vencidas nao ficam acumulando no banco
+                    _db["sessions"] = {t: s for t, s in _db["sessions"].items()
+                                       if s.get("exp", 0) > agora_t}
                     token = cria_sessao(u["id"])
+                # atras do HTTPS o cookie ganha "Secure" (nunca viaja sem criptografia)
+                seguro = "; Secure" if self.headers.get("X-Forwarded-Proto") == "https" else ""
                 return self.send_json(200, {"user": user_publico(u)}, headers={
-                    "Set-Cookie": "sessao=%s; Path=/; HttpOnly; SameSite=Lax; Max-Age=%d" % (
-                        token, SESSAO_DIAS * 86400)})
+                    "Set-Cookie": "sessao=%s; Path=/; HttpOnly; SameSite=Lax; Max-Age=%d%s" % (
+                        token, SESSAO_DIAS * 86400, seguro)})
             if not u:
                 hash_senha(senha, "00" * 16)  # equaliza o tempo (login inexistente)
+            with _lock:
+                reg = _login_falhas.setdefault(login, {"n": 0, "ate": 0})
+                reg["n"] += 1
+                if reg["n"] >= LOGIN_MAX_FALHAS:
+                    reg["ate"] = agora_t + LOGIN_BLOQUEIO_S
+                    reg["n"] = 0
+                    print("[seguranca] login '%s' travado por %ds (forca-bruta)" % (login, LOGIN_BLOQUEIO_S))
+                if len(_login_falhas) > 5000:  # nao crescer sem limite
+                    _login_falhas.clear()
             time.sleep(0.4)  # freia adivinhacao de senha, sem segurar o lock
             return self.send_json(401, {"error": "Login ou senha incorretos"})
 
@@ -3298,8 +3348,41 @@ class Handler(BaseHTTPRequestHandler):
         # sem cache: apos atualizar o CRM, um recarregar simples ja traz a
         # versao nova (evita interface velha presa no navegador da equipe)
         self.send_header("Cache-Control", "no-cache")
+        self.headers_seguranca()
         self.end_headers()
         self.wfile.write(data)
+
+
+# ---------------------------------------------------------------------------
+# Backup automatico diario do banco (a empresa ja perdeu dados uma vez por
+# erro operacional — esta e a rede de protecao). 1 copia por dia, 14 guardadas.
+# ---------------------------------------------------------------------------
+BACKUPS_DIR = os.path.join(DATA_DIR, "backups")
+BACKUPS_MANTER = 14
+
+
+def faz_backup_diario():
+    try:
+        os.makedirs(BACKUPS_DIR, exist_ok=True)
+        hoje = datetime.now(timezone.utc).astimezone(BRT).strftime("%Y-%m-%d")
+        alvo = os.path.join(BACKUPS_DIR, "leads-%s.json" % hoje)
+        if not os.path.exists(alvo) and os.path.exists(DB_FILE):
+            with _lock:  # copia consistente (nao no meio de uma gravacao)
+                shutil.copyfile(DB_FILE, alvo)
+            print("[backup] copia diaria salva: %s" % alvo)
+        # poda: guarda so as ultimas BACKUPS_MANTER copias
+        arqs = sorted(f for f in os.listdir(BACKUPS_DIR)
+                      if f.startswith("leads-") and f.endswith(".json"))
+        for velho in arqs[:-BACKUPS_MANTER]:
+            os.remove(os.path.join(BACKUPS_DIR, velho))
+    except Exception as e:
+        print("AVISO: backup diario falhou:", e)
+
+
+def _laco_backup():
+    while True:
+        faz_backup_diario()
+        time.sleep(3600)  # confere de hora em hora; grava 1 por dia
 
 
 def main():
@@ -3307,6 +3390,7 @@ def main():
     load_cidades()
     senha_admin = ensure_admin()
     ensure_webhook_token()
+    threading.Thread(target=_laco_backup, daemon=True).start()  # backup diario
     httpd = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
     print("")
     print("  CRM Nova Era Drones rodando")
