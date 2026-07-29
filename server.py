@@ -3048,7 +3048,9 @@ class Handler(BaseHTTPRequestHandler):
                                 msg = "📨 Saudação enviada pelo Chatwoot" if enviada else "💬 Atendimento aberto no Chatwoot"
                                 registra_hist(lead, autor, [msg], papel=papel, tipo="contato")
                                 lead["updated_at"] = now_iso()
-                            if not ja2:
+                            # saudacao realmente enviada = contato novo: reinicia o
+                            # relogio; so ABRIR a conversa (sem enviar) nao zera
+                            if enviada or not ja2:
                                 lead["aguardando_resposta"] = now_iso()
                             save_db()
             finally:
@@ -3210,9 +3212,11 @@ class Handler(BaseHTTPRequestHandler):
                             item = '📤 Chatwoot: %s%s' % (rotulo, (' "%s"' % resumo) if resumo else "") \
                                 if rotulo else ('📤 Chatwoot: "%s"' % resumo)
                             registra_hist(l3, autor, [item], papel=papel, tipo="contato")
-                            # quem manda mensagem espera resposta (menos lead encerrado)
-                            if l3.get("status") not in ("ganho", "perdido", "desistiu", "curioso") \
-                                    and not l3.get("aguardando_resposta"):
+                            # Mensagem DE FATO enviada reinicia o relogio da resposta
+                            # pendente: o card cobra "ha X" desde o ULTIMO contato real
+                            # (clique no botao de WhatsApp continua sem zerar, pois
+                            # abrir a conversa nao prova que algo foi enviado).
+                            if l3.get("status") not in ("ganho", "perdido", "desistiu", "curioso"):
                                 l3["aguardando_resposta"] = now_iso()
                             l3["updated_at"] = now_iso()
                             save_db()
