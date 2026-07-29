@@ -279,6 +279,7 @@ body.modo-recuperacao .toolbar { background: #fff7e8; box-shadow: inset 0 3px 0 
   color: #8a6100; background: #fff5d6; border: 1px solid #f2d888;
   border-radius: 6px; padding: 1px 6px; vertical-align: middle;
 }
+.card .wait-reply.respondeu { background: #ddf5e3; color: #1c6b3a; border: 1px solid #a9dfba; }
 .card .wait-reply.pendente { background: #fff5d6; color: #8a6100; border: 1px solid #f2d888; }
 .card .wait-reply.morno { background: #ffe8cf; color: #9a4d0a; border: 1px solid #f5c48a; }
 .card .wait-reply.urgente { background: #fde3e1; color: #b02a1f; border: 1px solid #f3b4ae; animation: heatBlink 1.6s infinite; }
@@ -623,6 +624,12 @@ a.cw-btn, a.cw-btn:visited { text-decoration: none; color: #1f4b99; } /* é um L
 .hist-entry.nota .hist-item {
   background: #eef5ff; border: 1px solid #d3e3ff; border-radius: 9px;
   padding: 6px 9px; color: #14356b; margin-top: 3px; white-space: pre-wrap;
+  max-width: 100%; overflow-wrap: anywhere; box-sizing: border-box;
+}
+.hist-entry.resposta::before { background: #1c9a4f; }
+.hist-entry.resposta .hist-item {
+  background: #e6f7ec; border: 1px solid #bfe8cd; border-radius: 9px;
+  padding: 6px 9px; color: #14562e; margin-top: 3px; white-space: pre-wrap;
   max-width: 100%; overflow-wrap: anywhere; box-sizing: border-box;
 }
 .hist-item { overflow-wrap: anywhere; }

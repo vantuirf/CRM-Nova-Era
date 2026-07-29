@@ -268,8 +268,8 @@ def precisa_retorno(lead, cadencia_dias):
     o registro da resposta (aguardando_resposta) NAO gera alerta de retorno."""
     if lead.get("status") in ("ganho", "perdido", "desistiu", "curioso"):
         return False
-    if lead.get("aguardando_resposta"):
-        return False
+    if lead.get("aguardando_resposta") or lead.get("cliente_respondeu"):
+        return False  # ja existe um aviso mais especifico no card
     t = _parse_iso(lead.get("updated_at") or lead.get("created_at"))
     if not t:
         return False
@@ -385,6 +385,9 @@ def load_db():
                 if not isinstance(l.get("historico"), list):
                     l["historico"] = []
                 l.setdefault("aguardando_resposta", None)
+                l.setdefault("cliente_respondeu", None)
+                if not isinstance(l.get("chatwoot_msgs_vistas"), list):
+                    l["chatwoot_msgs_vistas"] = []
             _db = data
     except Exception as e:
         # Arquivo ilegivel (queda de energia, edicao manual): NUNCA sobrescrever.
@@ -462,6 +465,10 @@ def make_lead(partial=None):
         "desistiu_em": None,     # data em que o cliente DESISTIU da compra (fixa)
         "aguardando_resposta": None,  # ISO do contato por WhatsApp que ainda espera
                                       # o vendedor REGISTRAR o que o cliente respondeu
+        "cliente_respondeu": None,    # ISO da ultima mensagem RECEBIDA do cliente que
+                                      # ainda espera a equipe responder (aviso verde)
+        "chatwoot_msgs_vistas": [],   # ids de mensagem ja processados do webhook
+                                      # (reentregas nao registram de novo)
         "created_at": now_iso(),  # data/hora de ENTRADA do lead
         "updated_at": now_iso(),
     }
@@ -764,9 +771,10 @@ def apply_updates(lead, updates):
         lead["perdido_em"] = now_iso()
     if lead.get("status") == "desistiu" and status_antes != "desistiu":
         lead["desistiu_em"] = now_iso()
-    # Lead encerrado nao deve mais cobrar "registre a resposta".
+    # Lead encerrado nao deve mais cobrar "registre a resposta" nem "responda".
     if lead.get("status") in ("ganho", "perdido", "desistiu", "curioso"):
         lead["aguardando_resposta"] = None
+        lead["cliente_respondeu"] = None
 
     # Nota fiscal exige contato completo: barra a MUDANCA para essas etapas
     if updates.get("status") in STAGES_EXIGEM_CONTATO and (
@@ -1661,6 +1669,181 @@ def _is_incoming(msg):
     return mt in ("incoming", 0, None)  # None: payload minimo/sintetico
 
 
+def _msg_id_int(payload):
+    """Id numerico da mensagem do webhook (0 quando nao veio/nao e numero)."""
+    mid = payload.get("id")
+    if isinstance(mid, int):
+        return mid
+    s = str(mid or "").strip()
+    return int(s) if s.isdigit() else 0
+
+
+def _conv_ids_do_evento(payload):
+    """Numero da conversa num evento de MENSAGEM.
+
+    O Chatwoot manda o display_id (o numero que aparece na tela e nas URLs —
+    e o que o CRM guarda) e um id global da instalacao. Quando o display_id
+    veio, ele e o UNICO candidato: misturar os dois casaria a conversa com o
+    lead errado (o display_id de um lead pode coincidir com o id global de
+    OUTRA conversa). O id global so serve de reserva quando o payload nao
+    trouxe display_id."""
+    conv = payload.get("conversation") or {}
+
+    def _n(v):
+        s = str(v).strip() if v is not None else ""
+        return int(s) if s.isdigit() else None
+
+    disp = _n(conv.get("display_id"))
+    if disp is not None:
+        return disp, {disp}
+    for v in (conv.get("id"), payload.get("conversation_id")):
+        n = _n(v)
+        if n is not None:
+            return n, {n}
+    return None, set()
+
+
+def _resumo_msg(payload):
+    """Frase curta descrevendo a mensagem (texto ate 200 letras + anexos)."""
+    texto = str(payload.get("content") or "").strip()
+    if len(texto) > 200:
+        texto = texto[:200] + "…"
+    rotulos = []
+    for a in (payload.get("attachments") or []):
+        ft = str((a or {}).get("file_type") or "") if isinstance(a, dict) else ""
+        rotulos.append({"image": "🖼 imagem", "audio": "🎤 áudio",
+                        "video": "🎬 vídeo"}.get(ft, "📎 arquivo"))
+    partes = " + ".join(rotulos)
+    if texto and partes:
+        return '%s "%s"' % (partes, texto)
+    if partes:
+        return partes
+    return '"%s"' % texto if texto else ""
+
+
+def _registra_msg_cliente(lead, payload):
+    """Mensagem RECEBIDA do cliente: grava o que ele disse no historico, baixa
+    o alerta "registre a resposta" (ja esta registrada) e acende o aviso verde
+    "cliente respondeu — responda!". Chamar SEGURANDO o _lock."""
+    # dedup por CONJUNTO de ids ja vistos (nao por "maior id"): webhooks chegam
+    # fora de ordem e uma mensagem atrasada legitima nao pode ser descartada
+    msg_id = _msg_id_int(payload)
+    vistos = lead.get("chatwoot_msgs_vistas")
+    if not isinstance(vistos, list):
+        vistos = []
+    if msg_id and msg_id in vistos:
+        return False  # reentrega da mesma mensagem (o Chatwoot repete envios)
+    if msg_id:
+        vistos.append(msg_id)
+        lead["chatwoot_msgs_vistas"] = vistos[-80:]
+    # Cliente dado como perdido/desistiu/curioso que volta a escrever NA MESMA
+    # conversa REABRE na triagem (mesma regra da conversa nova) — a equipe
+    # precisa enxergar a volta. Ganho continua ganho (vira pos-venda).
+    if lead.get("status") in ("perdido", "desistiu", "curioso"):
+        lead["status"] = "novo"
+        lead["tipo"] = ""
+        registra_hist(lead, "Chatwoot", ["🔄 Cliente voltou a escrever — reaberto na triagem"])
+    corpo = _resumo_msg(payload)
+    if corpo:
+        item = "📥 Cliente: " + corpo
+        # mensagens em sequencia (< 30 min) entram na MESMA entrada do
+        # historico — cliente que manda 6 frases nao vira 6 entradas
+        ult = lead["historico"][-1] if lead.get("historico") else None
+        junta = False
+        if ult and ult.get("tipo") == "resposta" and len(ult.get("itens") or []) < 30:
+            try:
+                t = datetime.fromisoformat(str(ult.get("data", "")).replace("Z", "+00:00"))
+                junta = (datetime.now(timezone.utc) - t) < timedelta(minutes=30)
+            except Exception:
+                junta = False
+        if junta:
+            ult["itens"].append(item)
+        else:
+            registra_hist(lead, "Cliente", [item], tipo="resposta")
+    # lead encerrado nao ganha cobranca (mesma regra dos outros alertas)
+    if lead.get("status") not in ("ganho", "perdido", "desistiu", "curioso"):
+        lead["cliente_respondeu"] = now_iso()
+        lead["aguardando_resposta"] = None
+    lead["updated_at"] = now_iso()
+    return True
+
+
+def _dt_msg(payload):
+    """Horario de criacao da mensagem do webhook como datetime UTC.
+
+    O Chatwoot manda created_at ora como unix (numero), ora como texto
+    ("2026-07-29T13:05:57Z" / "2026-07-29 13:05:57 UTC"). None se ilegivel."""
+    v = payload.get("created_at")
+    if v is None:
+        return None
+    if isinstance(v, (int, float)) and not isinstance(v, bool):
+        try:
+            return datetime.fromtimestamp(v, tz=timezone.utc)
+        except Exception:
+            return None
+    s = str(v).strip().replace(" UTC", "+00:00").replace("Z", "+00:00")
+    if "T" not in s:
+        s = s.replace(" ", "T", 1)
+    try:
+        dt = datetime.fromisoformat(s)
+        return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+    except Exception:
+        return None
+
+
+def _msg_atendente(payload):
+    """Mensagem ENVIADA pelo atendente (respondida direto no painel do Chatwoot,
+    ou o eco da que o CRM acabou de mandar): apaga o aviso "cliente respondeu"
+    e reinicia o relogio da resposta pendente. NUNCA cria nem mescla lead —
+    o sender de uma mensagem outgoing e o ATENDENTE, nao o cliente."""
+    if payload.get("event") != "message_created" or payload.get("private"):
+        return {"ok": True, "ignored": "mensagem sem efeito (nota/edicao)"}
+    if payload.get("message_type") not in ("outgoing", 1):
+        return {"ok": True, "ignored": "atividade/template"}
+    # So atendente HUMANO conta (sender tipo "user"). Robo, regra de automacao
+    # e campanha saem sem sender (ou com tipo proprio) — resposta automatica
+    # nao pode apagar o aviso "cliente respondeu" da equipe.
+    if str((payload.get("sender") or {}).get("type") or "").lower() != "user":
+        return {"ok": True, "ignored": "mensagem automatica (sem atendente)"}
+    _, cands = _conv_ids_do_evento(payload)
+    if not cands:
+        return {"ok": True, "ignored": "sem numero de conversa"}
+    with _lock:
+        lead = next((l for l in _db["leads"]
+                     if l.get("chatwoot_conversation_id") in cands), None)
+        if not lead:
+            return {"ok": True, "ignored": "conversa sem lead"}
+        msg_id = _msg_id_int(payload)
+        vistos = lead.get("chatwoot_msgs_vistas")
+        if not isinstance(vistos, list):
+            vistos = []
+        if msg_id and msg_id in vistos:
+            return {"ok": True, "ignored": "mensagem ja processada"}
+        if msg_id:
+            vistos.append(msg_id)
+            lead["chatwoot_msgs_vistas"] = vistos[-80:]
+        # Eco/entrega atrasada: se a resposta do cliente e MAIS NOVA que esta
+        # mensagem do atendente, a ultima palavra e do cliente — o aviso verde
+        # fica aceso (senao o eco da propria mensagem do CRM apagaria a
+        # resposta que chegou logo depois dela).
+        resp = lead.get("cliente_respondeu")
+        t_msg = _dt_msg(payload)
+        if resp and t_msg:
+            try:
+                t_resp = datetime.fromisoformat(str(resp).replace("Z", "+00:00"))
+                if t_msg <= t_resp:
+                    save_db()  # o id ja entrou na lista de vistos
+                    return {"ok": True, "ignored": "anterior a resposta do cliente"}
+            except Exception:
+                pass
+        lead["cliente_respondeu"] = None
+        if lead.get("status") not in ("ganho", "perdido", "desistiu", "curioso"):
+            lead["aguardando_resposta"] = now_iso()
+        lead["updated_at"] = now_iso()
+        save_db()
+    return {"ok": True, "atendente": True, "id": lead["id"]}
+
+
 def handle_chatwoot_event(payload):
     event = payload.get("event") if isinstance(payload, dict) else None
     if not event:
@@ -1671,11 +1854,17 @@ def handle_chatwoot_event(payload):
         conversation = payload
         conversation_id = payload.get("id")
     elif event in MESSAGE_EVENTS:
-        # mensagem do atendente/nota privada: nao mexe no lead
+        # edicao/apagamento de mensagem nao e atividade nova: nao pode mexer no
+        # lead (nem adiar o alerta de retorno via updated_at)
+        if event == "message_updated":
+            return {"ok": True, "ignored": "edicao de mensagem"}
+        # mensagem do atendente/nota privada: so baixa os avisos do lead
         if not _is_incoming(payload):
-            return {"ok": True, "ignored": "mensagem nao-recebida (outgoing/privada)"}
+            return _msg_atendente(payload)
         conversation = payload.get("conversation") or {}
-        conversation_id = conversation.get("id") or payload.get("conversation_id")
+        # preferimos o display_id (o numero que aparece nas URLs do Chatwoot);
+        # o id global fica como candidato para casar leads antigos
+        conversation_id, conv_cands = _conv_ids_do_evento(payload)
     else:
         return {"ok": True, "ignored": event}
 
@@ -1683,6 +1872,8 @@ def handle_chatwoot_event(payload):
     if conversation_id is not None and not isinstance(conversation_id, int):
         s = str(conversation_id).strip()
         conversation_id = int(s) if s.isdigit() else None
+    if event in CONVERSATION_EVENTS:
+        conv_cands = {conversation_id} if conversation_id is not None else set()
 
     meta = conversation.get("meta") or payload.get("meta") or {}
     sender = (
@@ -1786,8 +1977,9 @@ def handle_chatwoot_event(payload):
             incoming["campanha_id"] = ""
 
         lead = None
-        if conversation_id is not None:
-            lead = next((l for l in _db["leads"] if l.get("chatwoot_conversation_id") == conversation_id), None)
+        if conv_cands:
+            lead = next((l for l in _db["leads"]
+                         if l.get("chatwoot_conversation_id") in conv_cands), None)
 
         # Cliente conhecido abrindo conversa NOVA: reconhece pelo id do contato,
         # telefone ou e-mail e atualiza o lead existente em vez de duplicar
@@ -1829,6 +2021,9 @@ def handle_chatwoot_event(payload):
                 "📞 SDR: %s (rodízio)" % sdr if sdr else "",
             ], tipo="novo")
             _db["leads"].append(lead)
+            # primeira mensagem do cliente ja entra registrada no historico
+            if event == "message_created":
+                _registra_msg_cliente(lead, payload)
             save_db()
             print("[webhook] novo lead: %s -> SDR %s (canal: %s)" % (
                 nome or telefone or conversation_id, sdr or "-", canal or "-"))
@@ -1862,6 +2057,9 @@ def handle_chatwoot_event(payload):
         # pedido — o merge acima trata as chaves soltas e poderia divergir.
         if lead.get("itens"):
             lead["produto"] = resumo_produtos(lead["itens"])
+        # o que o cliente respondeu entra sozinho no historico + aviso "responda!"
+        if event == "message_created":
+            _registra_msg_cliente(lead, payload)
         lead["updated_at"] = now_iso()
         save_db()
         print("[webhook] lead atualizado: %s" % (lead.get("nome") or lead.get("telefone") or lead["id"]))
@@ -2251,6 +2449,7 @@ class Handler(BaseHTTPRequestHandler):
                 prestadores = sum(1 for l in visiveis if l.get("tipo") == "prestador")
                 pecuaristas = sum(1 for l in visiveis if l.get("tipo") == "pecuarista")
                 aguardando = sum(1 for l in visiveis if l.get("aguardando_resposta"))
+                respondeu = sum(1 for l in visiveis if l.get("cliente_respondeu"))
                 _cad = cadencia_dias_cfg()
                 retornos = sum(1 for l in visiveis if precisa_retorno(l, _cad))
                 # cidades presentes nos leads visiveis (para o filtro de cidade)
@@ -2263,8 +2462,9 @@ class Handler(BaseHTTPRequestHandler):
                     "prestadores": prestadores,
                     "pecuaristas": pecuaristas,
                     "aguardando_resposta": aguardando,
+                    "cliente_respondeu": respondeu,
                     "retornos": retornos,
-                    "alertas": aguardando + retornos,
+                    "alertas": aguardando + retornos + respondeu,
                     "atuais_total": n_atuais,
                     "recuperacao_total": n_recuperacao,
                     "servicos_total": n_servicos,
@@ -2920,12 +3120,15 @@ class Handler(BaseHTTPRequestHandler):
                         return self.send_json(201, {"entrada": ja,
                                                     "aguardando_resposta": lead.get("aguardando_resposta")})
                 registra_hist(lead, user["nome"], ["💬 " + texto], papel=user["papel"], tipo="nota", op_id=op_id or None, quando=ts_offline(body.get("criado_em")))
-                # A atualizacao escrita E o registro da resposta: some o alerta.
+                # A atualizacao escrita E o registro da resposta: some o alerta
+                # (e o aviso "cliente respondeu" tambem — foi tratado).
                 lead["aguardando_resposta"] = None
+                lead["cliente_respondeu"] = None
                 lead["updated_at"] = now_iso()
                 save_db()
                 return self.send_json(201, {"entrada": lead["historico"][-1],
-                                            "aguardando_resposta": lead["aguardando_resposta"]})
+                                            "aguardando_resposta": lead["aguardando_resposta"],
+                                            "cliente_respondeu": None})
 
         # Contato por WhatsApp: marca "aguardando o vendedor registrar a resposta"
         # e anota no historico. O alerta some quando alguem escreve uma nota.
@@ -2952,6 +3155,9 @@ class Handler(BaseHTTPRequestHandler):
                 # vermelho). O relogio conta desde o contato que ainda espera nota.
                 if not ja_pendente:
                     lead["aguardando_resposta"] = now_iso()
+                # foi responder pelo WhatsApp: os dois avisos nao coexistem
+                # (o contador e a central contam LEADS, nao avisos)
+                lead["cliente_respondeu"] = None
                 save_db()
                 return self.send_json(200, {"lead": lead})
 
@@ -2990,6 +3196,9 @@ class Handler(BaseHTTPRequestHandler):
                                                 "configurado": configurado,
                                                 "chatwoot_url": base, "chatwoot_account_id": acc})
                 _cw_em_voo.add(lead_id)
+            # respostas do cliente que chegarem DEPOIS deste instante (durante a
+            # chamada externa) nao podem ser apagadas pelo pos-envio
+            t_envio = now_iso()
             enviada, erro = False, None
             conectada = False
             try:
@@ -3049,9 +3258,15 @@ class Handler(BaseHTTPRequestHandler):
                                 registra_hist(lead, autor, [msg], papel=papel, tipo="contato")
                                 lead["updated_at"] = now_iso()
                             # saudacao realmente enviada = contato novo: reinicia o
-                            # relogio; so ABRIR a conversa (sem enviar) nao zera
-                            if enviada or not ja2:
+                            # relogio; so ABRIR a conversa (sem enviar) nao zera.
+                            # Resposta do cliente chegada DURANTE o envio fica.
+                            resp = lead.get("cliente_respondeu")
+                            chegou_durante = bool(resp and str(resp) > t_envio)
+                            if (enviada or not ja2) and not chegou_durante:
                                 lead["aguardando_resposta"] = now_iso()
+                                # exclusividade dos avisos: armar a cobranca de
+                                # registro apaga o verde (foi responder por la)
+                                lead["cliente_respondeu"] = None
                             save_db()
             finally:
                 with _lock:
@@ -3158,6 +3373,9 @@ class Handler(BaseHTTPRequestHandler):
                 if lead_id in _cw_em_voo:
                     return self.send_json(409, {"error": "Já tem um envio em andamento para este lead — aguarde uns segundos"})
                 _cw_em_voo.add(lead_id)
+            # respostas do cliente que chegarem DEPOIS deste instante (durante a
+            # chamada externa) nao podem ser apagadas pelo pos-envio
+            t_envio = now_iso()
             conectada, enviada, erro = False, False, None
             try:
                 # conecta se preciso (FORA do lock; mesmo padrao do botao)
@@ -3216,8 +3434,13 @@ class Handler(BaseHTTPRequestHandler):
                             # pendente: o card cobra "ha X" desde o ULTIMO contato real
                             # (clique no botao de WhatsApp continua sem zerar, pois
                             # abrir a conversa nao prova que algo foi enviado).
-                            if l3.get("status") not in ("ganho", "perdido", "desistiu", "curioso"):
-                                l3["aguardando_resposta"] = now_iso()
+                            # Se o cliente respondeu DURANTE o envio (webhook na
+                            # janela da chamada externa), o aviso verde dele fica.
+                            resp = l3.get("cliente_respondeu")
+                            if not (resp and str(resp) > t_envio):
+                                l3["cliente_respondeu"] = None  # respondemos: baixa o aviso
+                                if l3.get("status") not in ("ganho", "perdido", "desistiu", "curioso"):
+                                    l3["aguardando_resposta"] = now_iso()
                             l3["updated_at"] = now_iso()
                             save_db()
             finally:

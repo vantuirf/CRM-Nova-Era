@@ -345,6 +345,10 @@ async function mesclaFilaPendente() {
         data: it.criado_em, autor: (me && me.nome) || 'Você', papel: me && me.papel,
         itens: ['💬 ' + it.body.texto], tipo: 'nota', op_id: it.op_id, _pendente: true,
       });
+      // nota pendente já baixa os avisos localmente (o servidor fará o mesmo
+      // quando a fila sincronizar) — senão o cache offline os "ressuscita"
+      lead.aguardando_resposta = null;
+      lead.cliente_respondeu = null;
     }
   }
 }
@@ -462,7 +466,7 @@ function atualizaBotaoLimpar() {
 function leadsDaVisao() {
   if (currentView === 'perdidos') return leadsCache.filter((l) => l.status === 'perdido');
   if (currentView === 'desistiu') return leadsCache.filter((l) => l.status === 'desistiu');
-  if (currentView === 'alertas') return leadsCache.filter((l) => !!l.aguardando_resposta || !!precisaRetorno(l));
+  if (currentView === 'alertas') return leadsCache.filter((l) => !!l.cliente_respondeu || !!l.aguardando_resposta || !!precisaRetorno(l));
   if (currentView === 'map') return leadsCache.slice();
   return leadsCache.filter((FUNIS[currentView] || FUNIS.sdr).inclui);
 }
@@ -729,13 +733,22 @@ function aguardaResposta(lead) {
   return { ms, urgente: ms >= respostaHoras() * 3600000 };
 }
 
+// "Cliente respondeu — responda!" (o webhook do Chatwoot acende quando chega
+// mensagem do cliente; apaga quando a equipe responde ou registra uma nota).
+function clienteRespondeu(lead) {
+  if (!lead || STATUS_ENCERRADOS.includes(lead.status)) return null; // fechado não cobra
+  const t = lead.cliente_respondeu ? new Date(lead.cliente_respondeu).getTime() : NaN;
+  if (isNaN(t)) return null;
+  return { ms: Date.now() - t };
+}
+
 // Alerta de RETORNO: lead ativo parado há X dias sem contato. Quentes 🔥 são
 // cobrados na metade do prazo. Não aparece se já está aguardando resposta.
 // nivel: 'quente' (vermelho) | 'morno' (laranja) | 'frio' (amarelo).
 function precisaRetorno(lead) {
   if (!lead) return null;
   if (STATUS_ENCERRADOS.includes(lead.status)) return null;
-  if (lead.aguardando_resposta) return null;
+  if (lead.aguardando_resposta || lead.cliente_respondeu) return null;
   const heat = heatLevel(lead); // '' | 'recente' | 'quente'
   const base = cadenciaDias();
   const limiteDias = heat === 'quente' ? Math.max(1, Math.ceil(base / 2)) : base;
@@ -1057,6 +1070,8 @@ function renderDesistiu() {
 // 0 vermelho (resposta urgente ou lead quente), 1 laranja (morno),
 // 2 amarelo resposta pendente, 3 amarelo frio. Empate: mais antigo primeiro.
 function alertaOrdem(l) {
+  const cr = clienteRespondeu(l);
+  if (cr) return [0, -cr.ms]; // cliente esperando resposta = topo
   const ar = aguardaResposta(l);
   if (ar) return [ar.urgente ? 0 : 2, -ar.ms];
   const rt = precisaRetorno(l);
@@ -1067,11 +1082,11 @@ function alertaOrdem(l) {
 // Central de Alertas: junta "respostas a registrar" + "retornos a fazer" de TODOS
 // os funis num lugar só (o card de stats e o contador são globais). Urgentes no topo.
 function renderAlertas() {
-  const leads = leadsCache.filter((l) => !!l.aguardando_resposta || !!precisaRetorno(l));
+  const leads = leadsCache.filter((l) => !!l.cliente_respondeu || !!l.aguardando_resposta || !!precisaRetorno(l));
   const head = $('#alertasHead');
   head.innerHTML = '';
   head.append(el('div', 'lost-count', `🔔 ${leads.length} ${leads.length === 1 ? 'lead precisa de você' : 'leads precisam de você'}`));
-  head.append(el('div', 'lost-sub', 'Vermelho = urgente. Abra o card, fale com o cliente e registre no histórico — o alerta some.'));
+  head.append(el('div', 'lost-sub', 'Verde = o cliente respondeu, responda! Vermelho = urgente. Abra o card, fale com o cliente e registre — o alerta some.'));
 
   const grid = $('#alertasGrid');
   grid.innerHTML = '';
@@ -1168,6 +1183,7 @@ function updateLaneFilter(lanes) {
 
 function renderBoard() {
   if (currentView === 'map') return;
+  if (currentView === 'alertas') { renderAlertas(); return; } // central usa a própria grade
   const funil = FUNIS[currentView] || FUNIS.sdr;
   const board = $('#swimboard');
   board.innerHTML = '';
@@ -1278,8 +1294,14 @@ function renderCard(lead) {
     nome.append(b);
   }
   card.append(nome);
-  const ar = aguardaResposta(lead);
-  if (ar) {
+  const cr = clienteRespondeu(lead);
+  const ar = cr ? null : aguardaResposta(lead);
+  if (cr) {
+    const w = el('div', 'wait-reply respondeu');
+    w.append(el('span', 'ic', '💬'), document.createTextNode(
+      `Cliente respondeu há ${duracao(cr.ms)} — veja o chat e responda!`));
+    card.append(w);
+  } else if (ar) {
     const w = el('div', 'wait-reply ' + (ar.urgente ? 'urgente' : 'pendente'));
     w.append(el('span', 'ic', ar.urgente ? '⏰' : '📱'), document.createTextNode(
       ar.urgente ? `Resposta pendente há ${duracao(ar.ms)} — registre!`
@@ -1426,10 +1448,10 @@ async function dropLead(id, lane, col, funil) {
   // a raia define quem é o dono neste funil (SDR ou vendedor)
   patch[funil.campo] = lane.isNone ? '' : lane.nome;
 
-  const before = { status: lead.status, sdr: lead.sdr, vendedor: lead.vendedor, tipo: lead.tipo, aguardando_resposta: lead.aguardando_resposta, status_servico: lead.status_servico };
+  const before = { status: lead.status, sdr: lead.sdr, vendedor: lead.vendedor, tipo: lead.tipo, aguardando_resposta: lead.aguardando_resposta, cliente_respondeu: lead.cliente_respondeu, status_servico: lead.status_servico };
   Object.assign(lead, patch);
   // encerrar o lead tira o alerta na hora (o servidor faz o mesmo no PATCH)
-  if (['ganho', 'perdido', 'desistiu', 'curioso'].includes(lead.status)) lead.aguardando_resposta = null;
+  if (['ganho', 'perdido', 'desistiu', 'curioso'].includes(lead.status)) { lead.aguardando_resposta = null; lead.cliente_respondeu = null; }
   renderBoard();
 
   try {
@@ -1885,7 +1907,7 @@ function renderHistorico(lead) {
     return;
   }
   for (const h of hist) {
-    const e = el('div', 'hist-entry' + (h.tipo === 'nota' ? ' nota' : ''));
+    const e = el('div', 'hist-entry' + (h.tipo === 'nota' ? ' nota' : h.tipo === 'resposta' ? ' resposta' : ''));
     const quando = el('div', 'hist-when');
     quando.append(document.createTextNode(dataHora(h.data, true)));
     if (h._pendente) quando.append(el('span', 'pendente-envio', '📴 aguardando enviar'));
@@ -1922,6 +1944,7 @@ async function adicionarNota() {
       lead.updated_at = res.entrada.data;
       // registrar a atualização tira o alerta de "resposta pendente"
       if ('aguardando_resposta' in res) lead.aguardando_resposta = res.aguardando_resposta;
+      if ('cliente_respondeu' in res) lead.cliente_respondeu = res.cliente_respondeu;
       renderHistorico(lead);
       renderBoard();
       loadStats();
@@ -1937,6 +1960,7 @@ async function adicionarNota() {
       lead.historico = lead.historico || [];
       lead.historico.push({ data: criadoEm, autor: (me && me.nome) || 'Você', papel: me && me.papel, itens: ['💬 ' + texto], tipo: 'nota', op_id: opId, _pendente: true });
       lead.aguardando_resposta = null; // registrou a resposta (será confirmado no envio)
+      lead.cliente_respondeu = null; // a nota também baixa o aviso verde
       renderHistorico(lead);
       renderBoard();
     }
