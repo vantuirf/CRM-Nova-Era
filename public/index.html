@@ -390,18 +390,28 @@
   <div class="modal-backdrop" id="reportBackdrop" hidden>
     <div class="modal wide" role="dialog" aria-modal="true">
       <div class="modal-head">
-        <h2>📊 Relatório diário</h2>
+        <h2>📊 Relatórios</h2>
         <button class="icon-btn" id="reportClose" aria-label="Fechar">✕</button>
       </div>
       <div class="modal-body">
-        <p class="muted-note">Leads que chegaram por dia (do Chatwoot e demais origens) e quantos
-          o SDR qualificou. Use para acompanhar o volume de entrada e a produtividade da triagem.</p>
+        <p class="muted-note">Leads que chegaram (do Chatwoot e demais origens) e quantos o SDR
+          qualificou — por dia, semana ou mês. Use para acompanhar o volume de entrada e a
+          produtividade da triagem.</p>
         <div class="report-controls">
+          <label class="inline">Agrupar por
+            <select id="reportAgrupar">
+              <option value="dia" selected>Dia</option>
+              <option value="semana">Semana</option>
+              <option value="mes">Mês</option>
+            </select>
+          </label>
           <label class="inline">Período
             <select id="reportDias">
               <option value="7">Últimos 7 dias</option>
               <option value="30" selected>Últimos 30 dias</option>
               <option value="90">Últimos 90 dias</option>
+              <option value="180">Últimos 6 meses</option>
+              <option value="365">Último ano</option>
             </select>
           </label>
           <button class="btn primary small" id="btnReportCsv" type="button">⬇️ Baixar CSV</button>

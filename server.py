@@ -2809,15 +2809,29 @@ class Handler(BaseHTTPRequestHandler):
             if not gestor:
                 return self.send_json(403, {"error": "Relatório disponível só para gerente/administrador"})
             try:
-                dias = min(int((qs.get("dias") or ["30"])[0]), 180)
+                dias = min(int((qs.get("dias") or ["30"])[0]), 365)
             except ValueError:
                 dias = 30
+            # agrupar = dia (padrao) | semana (a linha e a segunda-feira) | mes
+            agrupar = (qs.get("agrupar") or ["dia"])[0]
+            if agrupar not in ("dia", "semana", "mes"):
+                agrupar = "dia"
+            # janela por DATA (ultimos N dias de verdade), nao por numero de linhas
+            corte = dia_brt((datetime.now(timezone.utc) - timedelta(days=dias)).isoformat())
+
+            def chave(d):  # d = "AAAA-MM-DD" ja em horario de Brasilia
+                if agrupar == "mes":
+                    return d[:7]  # "AAAA-MM"
+                if agrupar == "semana":
+                    dt = datetime.strptime(d, "%Y-%m-%d")
+                    return (dt - timedelta(days=dt.weekday())).strftime("%Y-%m-%d")
+                return d
             with _lock:
                 por_dia = {}
 
                 def bucket(d):
-                    return por_dia.setdefault(d, {
-                        "dia": d, "recebidos": 0, "recebidos_chatwoot": 0,
+                    return por_dia.setdefault(chave(d), {
+                        "dia": chave(d), "recebidos": 0, "recebidos_chatwoot": 0,
                         "qualificados": 0, "produtores": 0, "prestadores": 0, "pecuaristas": 0,
                         "cursos": 0, "ganhos": 0, "perdidos": 0, "desistidos": 0})
 
@@ -2825,13 +2839,13 @@ class Handler(BaseHTTPRequestHandler):
                     if l.get("recuperacao"):
                         continue  # relatorio = leads NOVOS, sem o lote de recuperacao
                     d = dia_brt(l.get("created_at"))
-                    if d:
+                    if d and d >= corte:
                         b = bucket(d)
                         b["recebidos"] += 1
                         if l.get("source") == "chatwoot":
                             b["recebidos_chatwoot"] += 1
                     dq = dia_brt(l.get("qualificado_em"))
-                    if dq:
+                    if dq and dq >= corte:
                         b = bucket(dq)
                         b["qualificados"] += 1
                         if l.get("tipo") == "produtor":
@@ -2844,23 +2858,24 @@ class Handler(BaseHTTPRequestHandler):
                             b["cursos"] += 1
                     if l.get("status") == "ganho":
                         dg = dia_brt(l.get("ganho_em") or l.get("updated_at"))
-                        if dg:
+                        if dg and dg >= corte:
                             bucket(dg)["ganhos"] += 1
                     elif l.get("status") == "perdido":
                         dp = dia_brt(l.get("perdido_em") or l.get("updated_at"))
-                        if dp:
+                        if dp and dp >= corte:
                             bucket(dp)["perdidos"] += 1
                     elif l.get("status") == "desistiu":
                         dd = dia_brt(l.get("desistiu_em") or l.get("updated_at"))
-                        if dd:
+                        if dd and dd >= corte:
                             bucket(dd)["desistidos"] += 1
 
-                linhas = sorted(por_dia.values(), key=lambda r: r["dia"], reverse=True)[:dias]
+                linhas = sorted(por_dia.values(), key=lambda r: r["dia"], reverse=True)
                 totais = {"recebidos": sum(r["recebidos"] for r in linhas),
                           "recebidos_chatwoot": sum(r["recebidos_chatwoot"] for r in linhas),
                           "qualificados": sum(r["qualificados"] for r in linhas),
+                          "cursos": sum(r["cursos"] for r in linhas),
                           "ganhos": sum(r["ganhos"] for r in linhas)}
-                return self.send_json(200, {"report": linhas, "totais": totais})
+                return self.send_json(200, {"report": linhas, "totais": totais, "agrupar": agrupar})
 
         # Equipe (visao dos usuarios com papel de raia: SDRs e vendedores).
         # Leitura para todos (nomes das raias); criacao/edicao so gestores —

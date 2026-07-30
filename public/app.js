@@ -2635,10 +2635,18 @@ $('#btnSaveAlertas').addEventListener('click', async () => {
 // Relatório diário (leads recebidos × qualificados)
 // ---------------------------------------------------------------------------
 let reportCache = [];
+let reportAgruparAtual = 'dia'; // agrupamento da última carga (p/ o CSV bater com a tela)
 
 function fmtDia(iso) {
   const [a, m, d] = iso.split('-');
   return `${d}/${m}/${a}`;
+}
+
+// Rótulo do período conforme o agrupamento ("30/07/2026" · "Semana de 27/07" · "07/2026")
+function fmtPeriodo(chave, agrupar) {
+  if (agrupar === 'mes') { const [a, m] = chave.split('-'); return `${m}/${a}`; }
+  if (agrupar === 'semana') return 'Semana de ' + fmtDia(chave);
+  return fmtDia(chave);
 }
 
 async function renderReport() {
@@ -2649,14 +2657,17 @@ async function renderReport() {
   totals.append(el('div', 'team-empty', 'Carregando…'));
   try {
     const dias = $('#reportDias').value;
-    const data = await api('/api/report/diario?dias=' + dias);
+    const agrupar = $('#reportAgrupar').value;
+    const data = await api('/api/report/diario?dias=' + dias + '&agrupar=' + agrupar);
     reportCache = data.report || [];
+    reportAgruparAtual = agrupar;
     const t = data.totais || {};
     totals.innerHTML = '';
     const cards = [
       { n: t.recebidos || 0, l: 'Leads recebidos' },
       { n: t.recebidos_chatwoot || 0, l: 'Via Chatwoot' },
       { n: t.qualificados || 0, l: 'Qualificados' },
+      { n: t.cursos || 0, l: '🎓 Curso' },
       { n: t.ganhos || 0, l: 'Ganhos' },
     ];
     for (const c of cards) {
@@ -2666,15 +2677,15 @@ async function renderReport() {
     }
     if (!reportCache.length) { body.append(el('div', 'team-empty', 'Sem movimento no período.')); return; }
     const table = document.createElement('table');
-    table.innerHTML = '<thead><tr><th>Dia</th>' +
+    table.innerHTML = '<thead><tr><th>' + (agrupar === 'mes' ? 'Mês' : agrupar === 'semana' ? 'Semana' : 'Dia') + '</th>' +
       '<th class="num">Recebidos</th><th class="num">Chatwoot</th>' +
-      '<th class="num">Qualificados</th><th class="num">🌾 Prod.</th><th class="num">🐄 Pec.</th><th class="num">🔧 Prest.</th>' +
+      '<th class="num">Qualificados</th><th class="num">🌾 Prod.</th><th class="num">🐄 Pec.</th><th class="num">🔧 Prest.</th><th class="num">🎓 Curso</th>' +
       '<th class="num">Ganhos</th><th class="num">Concorrente</th><th class="num">Desistiu</th></tr></thead>';
     const tb = document.createElement('tbody');
     for (const r of reportCache) {
       const tr = document.createElement('tr');
-      const cells = [fmtDia(r.dia), r.recebidos, r.recebidos_chatwoot, r.qualificados,
-        r.produtores, r.pecuaristas || 0, r.prestadores, r.ganhos, r.perdidos, r.desistidos || 0];
+      const cells = [fmtPeriodo(r.dia, agrupar), r.recebidos, r.recebidos_chatwoot, r.qualificados,
+        r.produtores, r.pecuaristas || 0, r.prestadores, r.cursos || 0, r.ganhos, r.perdidos, r.desistidos || 0];
       cells.forEach((v, i) => {
         const td = document.createElement('td');
         if (i >= 1) td.className = 'num';
@@ -2694,13 +2705,14 @@ async function renderReport() {
 
 function baixarReportCsv() {
   if (!reportCache.length) { toast('Nada para exportar'); return; }
-  const head = 'dia;recebidos;recebidos_chatwoot;qualificados;produtores;pecuaristas;prestadores;ganhos;perdidos;desistidos';
+  const per = reportAgruparAtual === 'mes' ? 'mes' : reportAgruparAtual === 'semana' ? 'semana' : 'dia';
+  const head = per + ';recebidos;recebidos_chatwoot;qualificados;produtores;pecuaristas;prestadores;cursos;ganhos;perdidos;desistidos';
   const linhas = reportCache.map((r) => [r.dia, r.recebidos, r.recebidos_chatwoot,
-    r.qualificados, r.produtores, r.pecuaristas || 0, r.prestadores, r.ganhos, r.perdidos, r.desistidos || 0].join(';'));
+    r.qualificados, r.produtores, r.pecuaristas || 0, r.prestadores, r.cursos || 0, r.ganhos, r.perdidos, r.desistidos || 0].join(';'));
   const csv = '﻿' + head + '\n' + linhas.join('\n') + '\n';
   const a = document.createElement('a');
   a.href = 'data:text/csv;charset=utf-8,' + encodeURIComponent(csv);
-  a.download = 'relatorio-diario.csv';
+  a.download = 'relatorio-' + (per === 'dia' ? 'diario' : per === 'semana' ? 'semanal' : 'mensal') + '.csv';
   a.click();
 }
 
@@ -2708,6 +2720,7 @@ $('#btnReport').addEventListener('click', () => { $('#reportBackdrop').hidden = 
 $('#reportClose').addEventListener('click', () => { $('#reportBackdrop').hidden = true; });
 $('#reportBackdrop').addEventListener('click', (e) => { if (e.target === $('#reportBackdrop')) $('#reportBackdrop').hidden = true; });
 $('#reportDias').addEventListener('change', renderReport);
+$('#reportAgrupar').addEventListener('change', renderReport);
 $('#btnReportCsv').addEventListener('click', baixarReportCsv);
 
 // ---------------------------------------------------------------------------
