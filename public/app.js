@@ -2658,7 +2658,25 @@ async function renderReport() {
   try {
     const dias = $('#reportDias').value;
     const agrupar = $('#reportAgrupar').value;
-    const data = await api('/api/report/diario?dias=' + dias + '&agrupar=' + agrupar);
+    // "Período específico…" mostra os campos De/Até; os demais escondem
+    const especifico = dias === 'custom';
+    $('#reportDeWrap').hidden = !especifico;
+    $('#reportAteWrap').hidden = !especifico;
+    let q = 'agrupar=' + agrupar;
+    if (especifico) {
+      const de = $('#reportDe').value;
+      const ate = $('#reportAte').value;
+      if (!de && !ate) {
+        totals.innerHTML = '';
+        body.append(el('div', 'team-empty', 'Escolha as datas do período (De e/ou Até) para gerar o relatório.'));
+        return;
+      }
+      if (de) q += '&de=' + de;
+      if (ate) q += '&ate=' + ate;
+    } else {
+      q += '&dias=' + dias;
+    }
+    const data = await api('/api/report/diario?' + q);
     reportCache = data.report || [];
     reportAgruparAtual = agrupar;
     const t = data.totais || {};
@@ -2721,6 +2739,8 @@ $('#reportClose').addEventListener('click', () => { $('#reportBackdrop').hidden 
 $('#reportBackdrop').addEventListener('click', (e) => { if (e.target === $('#reportBackdrop')) $('#reportBackdrop').hidden = true; });
 $('#reportDias').addEventListener('change', renderReport);
 $('#reportAgrupar').addEventListener('change', renderReport);
+$('#reportDe').addEventListener('change', renderReport);
+$('#reportAte').addEventListener('change', renderReport);
 $('#btnReportCsv').addEventListener('click', baixarReportCsv);
 
 // ---------------------------------------------------------------------------

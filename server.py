@@ -2816,8 +2816,28 @@ class Handler(BaseHTTPRequestHandler):
             agrupar = (qs.get("agrupar") or ["dia"])[0]
             if agrupar not in ("dia", "semana", "mes"):
                 agrupar = "dia"
-            # janela por DATA (ultimos N dias de verdade), nao por numero de linhas
-            corte = dia_brt((datetime.now(timezone.utc) - timedelta(days=dias)).isoformat())
+
+            def _data_ok(s):
+                try:
+                    datetime.strptime(s, "%Y-%m-%d")
+                    return True
+                except (ValueError, TypeError):
+                    return False
+            # Janela por DATA (ultimos N dias de verdade), nao por numero de
+            # linhas. Alternativas: dias<=0 = TEMPO TOTAL (desde o inicio);
+            # de/ate = PERIODO ESPECIFICO escolhido pelo gestor (datas BRT,
+            # inclusivas; pode vir so uma das pontas).
+            de = (qs.get("de") or [""])[0]
+            ate = (qs.get("ate") or [""])[0]
+            teto = "9999-12-31"
+            if _data_ok(de) or _data_ok(ate):
+                corte = de if _data_ok(de) else "0000-01-01"
+                if _data_ok(ate):
+                    teto = ate
+            elif dias <= 0:
+                corte = "0000-01-01"
+            else:
+                corte = dia_brt((datetime.now(timezone.utc) - timedelta(days=dias)).isoformat())
 
             def chave(d):  # d = "AAAA-MM-DD" ja em horario de Brasilia
                 if agrupar == "mes":
@@ -2839,13 +2859,13 @@ class Handler(BaseHTTPRequestHandler):
                     if l.get("recuperacao"):
                         continue  # relatorio = leads NOVOS, sem o lote de recuperacao
                     d = dia_brt(l.get("created_at"))
-                    if d and d >= corte:
+                    if d and corte <= d <= teto:
                         b = bucket(d)
                         b["recebidos"] += 1
                         if l.get("source") == "chatwoot":
                             b["recebidos_chatwoot"] += 1
                     dq = dia_brt(l.get("qualificado_em"))
-                    if dq and dq >= corte:
+                    if dq and corte <= dq <= teto:
                         b = bucket(dq)
                         b["qualificados"] += 1
                         if l.get("tipo") == "produtor":
@@ -2858,15 +2878,15 @@ class Handler(BaseHTTPRequestHandler):
                             b["cursos"] += 1
                     if l.get("status") == "ganho":
                         dg = dia_brt(l.get("ganho_em") or l.get("updated_at"))
-                        if dg and dg >= corte:
+                        if dg and corte <= dg <= teto:
                             bucket(dg)["ganhos"] += 1
                     elif l.get("status") == "perdido":
                         dp = dia_brt(l.get("perdido_em") or l.get("updated_at"))
-                        if dp and dp >= corte:
+                        if dp and corte <= dp <= teto:
                             bucket(dp)["perdidos"] += 1
                     elif l.get("status") == "desistiu":
                         dd = dia_brt(l.get("desistiu_em") or l.get("updated_at"))
-                        if dd and dd >= corte:
+                        if dd and corte <= dd <= teto:
                             bucket(dd)["desistidos"] += 1
 
                 linhas = sorted(por_dia.values(), key=lambda r: r["dia"], reverse=True)
