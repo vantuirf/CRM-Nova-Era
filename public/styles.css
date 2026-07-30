@@ -379,6 +379,18 @@ body.modo-recuperacao .toolbar { background: #fff7e8; box-shadow: inset 0 3px 0 
 .escopo-badge.serv { background: #0e7490; color: #e0f7ff; }
 #escServ.active { color: #0e5a6e; }
 body.modo-servicos .toolbar { background: #eef8fb; box-shadow: inset 0 3px 0 #0e7490; }
+/* botão Curso do switch de escopo (painel do curso de pilotagem) */
+.escopo-badge.curso { background: #6b46c1; color: #f3ecfe; }
+#escCurso.active { color: #553c9a; }
+body.modo-curso .toolbar { background: #f6f2fd; box-shadow: inset 0 3px 0 #6b46c1; }
+.tag.valor.curso { background: #f3ecfe; color: #553c9a; }
+/* colunas do painel do Curso */
+.st-interessado_curso .dot { background: #6b46c1; }
+.st-ofertado_curso .dot { background: #0e7490; }
+.st-negociando_curso .dot { background: var(--purple); }
+.st-proposta_curso .dot { background: #b8860b; }
+.st-matriculado .dot { background: var(--green-500); }
+.st-recusado_curso .dot { background: #718096; }
 /* caixa de seleção da ação em massa */
 .bulk-check {
   display: flex; align-items: flex-start; gap: 8px; font-size: 13px;

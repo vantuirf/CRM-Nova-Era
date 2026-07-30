@@ -74,6 +74,11 @@ SALES_STAGES = ("qualificado", "decidindo", "negociacao", "proposta",
 SERVICO_STAGES = ("recebido_serv", "ofertado", "negociando_serv",
                   "proposta_serv", "vendido_serv", "recusado_serv")
 
+# Painel do CURSO (venda do curso de pilotagem): funil paralelo proprio, como
+# Servicos. Entrada SO MANUAL — ninguem entra sozinho; o time marca na ficha.
+CURSO_STAGES = ("interessado_curso", "ofertado_curso", "negociando_curso",
+                "proposta_curso", "matriculado", "recusado_curso")
+
 # Papeis da equipe (raias dos funis)
 PAPEIS = ("sdr", "vendedor")
 
@@ -93,6 +98,7 @@ EDITABLE = {
     "campanha_id", "utm_source", "utm_medium", "utm_campaign", "utm_content",
     "utm_term", "status", "observacoes", "lat", "lng", "recuperacao",
     "em_servicos", "status_servico", "valor_servico",
+    "em_curso", "status_curso", "valor_curso",
 }
 
 # Canais aceitos para campanhas cadastradas
@@ -380,6 +386,9 @@ def load_db():
                 l.setdefault("em_servicos", False)
                 l.setdefault("status_servico", "")
                 l.setdefault("valor_servico", 0)
+                l.setdefault("em_curso", False)
+                l.setdefault("status_curso", "")
+                l.setdefault("valor_curso", 0)
                 if not isinstance(l.get("visitas"), list):
                     l["visitas"] = []
                 if not isinstance(l.get("historico"), list):
@@ -454,6 +463,9 @@ def make_lead(partial=None):
         "em_servicos": False,  # True = tambem esta no painel de Servicos (pos-venda)
         "status_servico": "",  # etapa no funil de Servicos (SERVICO_STAGES)
         "valor_servico": 0,    # valor do negocio de servicos (separado do drone)
+        "em_curso": False,     # True = tambem esta no painel do Curso (entrada manual)
+        "status_curso": "",    # etapa no funil do Curso (CURSO_STAGES)
+        "valor_curso": 0,      # valor do curso (separado do drone e dos servicos)
         "observacoes": "",
         "lat": None,   # localizacao exata da fazenda (ajustada no mapa);
         "lng": None,   # None = usar o centro da cidade (regiao) como aproximacao
@@ -653,6 +665,12 @@ def descreve_mudancas(antes, depois, campos):
             itens.append("🔧 Serviços — etapa: %s" % (d or "—"))
         elif k == "valor_servico":
             itens.append("🔧 Serviços — valor: R$ %s" % ("{:,.0f}".format(float(d or 0)).replace(",", ".")))
+        elif k == "em_curso":
+            itens.append("🎓 " + ("Entrou no painel do Curso" if d else "Saiu do painel do Curso"))
+        elif k == "status_curso":
+            itens.append("🎓 Curso — etapa: %s" % (d or "—"))
+        elif k == "valor_curso":
+            itens.append("🎓 Curso — valor: R$ %s" % ("{:,.0f}".format(float(d or 0)).replace(",", ".")))
         elif k == "formas_pagamento":
             itens.append("💳 Forma de pagamento atualizada")
         elif k == "observacoes":
@@ -714,6 +732,25 @@ def apply_updates(lead, updates):
             except (TypeError, ValueError):
                 vs = 0.0
             lead["valor_servico"] = vs if math.isfinite(vs) and vs >= 0 else 0.0
+            continue
+        if key == "em_curso":
+            lead["em_curso"] = bool(value)
+            if lead["em_curso"] and not lead.get("status_curso"):
+                lead["status_curso"] = CURSO_STAGES[0]  # entrou -> primeira etapa
+            continue
+        if key == "status_curso":
+            if value in CURSO_STAGES:
+                lead["status_curso"] = value
+                lead["em_curso"] = True  # ter etapa de curso = estar no painel
+            elif value == "":
+                lead["status_curso"] = ""
+            continue
+        if key == "valor_curso":
+            try:
+                vc = float(value) if value not in ("", None) else 0.0
+            except (TypeError, ValueError):
+                vc = 0.0
+            lead["valor_curso"] = vc if math.isfinite(vc) and vc >= 0 else 0.0
             continue
         if key == "regiao" and value and _CIDADES_CANON:
             canon = canon_cidade(value)
@@ -807,6 +844,12 @@ def apply_updates(lead, updates):
             lead["status_servico"] = SERVICO_STAGES[0]
     else:
         lead["status_servico"] = ""
+    # Mesmo invariante para o painel do Curso (entrada e saida so manuais).
+    if lead.get("em_curso"):
+        if lead.get("status_curso") not in CURSO_STAGES:
+            lead["status_curso"] = CURSO_STAGES[0]
+    else:
+        lead["status_curso"] = ""
 
     lead["updated_at"] = now_iso()
     return lead
@@ -2445,9 +2488,14 @@ class Handler(BaseHTTPRequestHandler):
                 n_recuperacao = sum(1 for l in todos_visiveis if l.get("recuperacao")) if pode_rec else 0
                 n_servicos = sum(1 for l in todos_visiveis if l.get("em_servicos")) \
                     if user["papel"] != "sdr" else 0
+                n_curso = sum(1 for l in todos_visiveis if l.get("em_curso")) \
+                    if user["papel"] != "sdr" else 0
                 n_atuais = sum(1 for l in todos_visiveis if not l.get("recuperacao"))
                 if escopo == "servicos":
                     visiveis = [l for l in todos_visiveis if l.get("em_servicos")] \
+                        if user["papel"] != "sdr" else []
+                elif escopo == "curso":
+                    visiveis = [l for l in todos_visiveis if l.get("em_curso")] \
                         if user["papel"] != "sdr" else []
                 elif escopo == "recuperacao":
                     visiveis = [l for l in todos_visiveis if l.get("recuperacao")] if pode_rec else []
@@ -2484,6 +2532,7 @@ class Handler(BaseHTTPRequestHandler):
                     "atuais_total": n_atuais,
                     "recuperacao_total": n_recuperacao,
                     "servicos_total": n_servicos,
+                    "curso_total": n_curso,
                     "cadencia_dias": _cad,
                     "resposta_horas": resposta_horas_cfg(),
                     "chatwoot_url": str(_db.get("settings", {}).get("chatwoot_url") or ""),
@@ -2893,6 +2942,9 @@ class Handler(BaseHTTPRequestHandler):
             if escopo == "servicos":
                 # painel de Servicos e trabalho de vendedor — SDR nao acessa
                 leads = [l for l in leads if l.get("em_servicos")] if user["papel"] != "sdr" else []
+            elif escopo == "curso":
+                # painel do Curso idem — venda e trabalho de vendedor
+                leads = [l for l in leads if l.get("em_curso")] if user["papel"] != "sdr" else []
             elif escopo == "recuperacao":
                 # só quem tem acesso liberado vê a Recuperação
                 leads = [l for l in leads if l.get("recuperacao")] if pode_recuperacao(user) else []
@@ -3476,6 +3528,20 @@ class Handler(BaseHTTPRequestHandler):
                 body = self.read_body()
             except Exception:
                 return self.send_json(400, {"error": "Corpo invalido"})
+            # Regras por papel valem TAMBEM na criacao (o PATCH ja barra; sem
+            # isto o SDR entraria nas etapas/paineis de venda por este caminho).
+            # Valores efetivos dao 403; sobras vazias do formulario (checkbox
+            # desmarcado, campo em branco) sao apenas descartadas.
+            if user["papel"] == "sdr":
+                if body.get("status") in ETAPAS_DE_VENDA:
+                    return self.send_json(403, {"error": "Etapas de venda são trabalho dos vendedores — o SDR vai até a qualificação"})
+                if body.get("em_servicos") or body.get("status_servico") or body.get("valor_servico"):
+                    return self.send_json(403, {"error": "O painel de Serviços é trabalho dos vendedores"})
+                if body.get("em_curso") or body.get("status_curso") or body.get("valor_curso"):
+                    return self.send_json(403, {"error": "O painel do Curso é trabalho dos vendedores"})
+                for k in ("em_servicos", "status_servico", "valor_servico",
+                          "em_curso", "status_curso", "valor_curso"):
+                    body.pop(k, None)
             with _lock:
                 lead = make_lead({"source": "manual"})
                 try:
@@ -3529,8 +3595,15 @@ class Handler(BaseHTTPRequestHandler):
                     # nem o painel de Servicos (pos-venda)
                     if user["papel"] == "sdr" and body.get("status") in ETAPAS_DE_VENDA:
                         return self.send_json(403, {"error": "Etapas de venda são trabalho dos vendedores — o SDR vai até a qualificação"})
-                    if user["papel"] == "sdr" and (body.get("em_servicos") or body.get("status_servico")):
+                    # trava por PRESENCA da chave (nao por valor truthy): senao o
+                    # SDR tiraria o lead do painel com em_servicos/em_curso=false,
+                    # rebaixaria a etapa com "" ou editaria o valor
+                    if user["papel"] == "sdr" and any(
+                            k in body for k in ("em_servicos", "status_servico", "valor_servico")):
                         return self.send_json(403, {"error": "O painel de Serviços é trabalho dos vendedores"})
+                    if user["papel"] == "sdr" and any(
+                            k in body for k in ("em_curso", "status_curso", "valor_curso")):
+                        return self.send_json(403, {"error": "O painel do Curso é trabalho dos vendedores"})
                     if user["papel"] == "vendedor" and "vendedor" in body and body["vendedor"] not in ("", user["nome"]):
                         return self.send_json(403, {"error": "Vendedor só pode assumir o lead para si"})
                     # aplica numa copia: se uma regra barrar no meio, o lead

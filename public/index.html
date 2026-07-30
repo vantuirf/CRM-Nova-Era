@@ -74,6 +74,7 @@
       <button type="button" class="escopo-opt active" id="escAtuais" data-escopo="atuais">📊 Atuais</button>
       <button type="button" class="escopo-opt" id="escRecup" data-escopo="recuperacao">🔄 Recuperação<span class="escopo-badge" id="escRecupBadge" hidden></span></button>
       <button type="button" class="escopo-opt" id="escServ" data-escopo="servicos">🔧 Serviços<span class="escopo-badge serv" id="escServBadge" hidden></span></button>
+      <button type="button" class="escopo-opt" id="escCurso" data-escopo="curso">🎓 Curso<span class="escopo-badge curso" id="escCursoBadge" hidden></span></button>
     </div>
     <div class="view-tabs" id="viewTabs" role="tablist">
       <button class="view-tab active" id="tabSDR" role="tab">📞 Funil SDR</button>
@@ -240,6 +241,23 @@
           </label>
           <label>Valor do serviço (R$)
             <input name="valor_servico" type="number" min="0" step="100" placeholder="0" />
+          </label>
+
+          <div class="section-title full">🎓 Curso de pilotagem</div>
+          <label class="recup-toggle full"><input type="checkbox" name="em_curso" /> <span>Cliente no painel do Curso (interessado em fazer o curso)</span></label>
+          <label>Etapa do curso
+            <select name="status_curso">
+              <option value="">—</option>
+              <option value="interessado_curso">🎓 Interessado</option>
+              <option value="ofertado_curso">📞 Ofereci o curso</option>
+              <option value="negociando_curso">💬 Negociando</option>
+              <option value="proposta_curso">📄 Proposta enviada</option>
+              <option value="matriculado">🏆 Matriculado</option>
+              <option value="recusado_curso">❌ Não quis</option>
+            </select>
+          </label>
+          <label>Valor do curso (R$)
+            <input name="valor_curso" type="number" min="0" step="100" placeholder="0" />
           </label>
 
           <div class="section-title full">Responsáveis</div>

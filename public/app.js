@@ -85,6 +85,22 @@ const SERVICO_LABEL = {
   vendido_serv: '🏆 Serviço vendido', recusado_serv: '❌ Não quis',
 };
 
+// Painel do CURSO de pilotagem: funil paralelo próprio (como Serviços), com
+// entrada SÓ manual — o time marca "em_curso" na ficha do cliente.
+const KCOL = {
+  interessado_curso: { key: 'interessado_curso', label: '🎓 Interessado', patch: { status_curso: 'interessado_curso' }, match: (l) => l.status_curso === 'interessado_curso' },
+  ofertado_curso: { key: 'ofertado_curso', label: '📞 Ofereci o curso', patch: { status_curso: 'ofertado_curso' }, match: (l) => l.status_curso === 'ofertado_curso' },
+  negociando_curso: { key: 'negociando_curso', label: '💬 Negociando', patch: { status_curso: 'negociando_curso' }, match: (l) => l.status_curso === 'negociando_curso' },
+  proposta_curso: { key: 'proposta_curso', label: '📄 Proposta enviada', patch: { status_curso: 'proposta_curso' }, match: (l) => l.status_curso === 'proposta_curso' },
+  matriculado: { key: 'matriculado', label: '🏆 Matriculado', patch: { status_curso: 'matriculado' }, match: (l) => l.status_curso === 'matriculado' },
+  recusado_curso: { key: 'recusado_curso', label: '❌ Não quis', patch: { status_curso: 'recusado_curso' }, match: (l) => l.status_curso === 'recusado_curso' },
+};
+FUNIS.curso = {
+  papel: 'vendedor', campo: 'vendedor', servico: true,
+  colunas: [KCOL.interessado_curso, KCOL.ofertado_curso, KCOL.negociando_curso, KCOL.proposta_curso, KCOL.matriculado, KCOL.recusado_curso],
+  inclui: (l) => !!l.em_curso,
+};
+
 let leadsCache = [];
 let primeiroLoadFeito = false; // só avisa "nada encontrado" depois do 1º carregamento
 let members = [];
@@ -416,7 +432,7 @@ async function loadStats() {
     // base do Chatwoot chega a todos (não é segredo) p/ montar o link da conversa
     if ('chatwoot_url' in s) settings.chatwoot_url = s.chatwoot_url;
     if ('chatwoot_account_id' in s) settings.chatwoot_account_id = s.chatwoot_account_id;
-    atualizaEscopoSwitch(s.atuais_total, s.recuperacao_total, s.servicos_total);
+    atualizaEscopoSwitch(s.atuais_total, s.recuperacao_total, s.servicos_total, s.curso_total);
     const box = $('#stats');
     box.innerHTML = '';
     const cards = [
@@ -429,7 +445,7 @@ async function loadStats() {
     ];
     // só aparece quando há alertas (mantém a barra enxuta); clica p/ abrir a
     // central. No painel de Serviços não faz sentido (evita beco sem saída).
-    if (s.alertas && escopo !== 'servicos') {
+    if (s.alertas && escopo !== 'servicos' && escopo !== 'curso') {
       cards.push({ n: s.alertas, l: '🔔 Alertas', cls: 'wait', acao: abrirAlertas });
     }
     for (const c of cards) {
@@ -473,7 +489,7 @@ function leadsDaVisao() {
 function leadsNaVisao() { return leadsDaVisao().length; }
 const VIEW_LABEL = {
   sdr: 'Funil SDR', produtor: 'Produtores', pecuarista: 'Pecuaristas', prestador: 'Prestadores',
-  perdidos: 'Perdido p/ concorrente', desistiu: 'Desistiu', map: 'Mapa', servicos: 'Serviços',
+  perdidos: 'Perdido p/ concorrente', desistiu: 'Desistiu', map: 'Mapa', servicos: 'Serviços', curso: 'Curso',
 };
 // resultados terminais que a ação em massa nunca deve alterar
 const STATUS_ENCERRADOS = ['ganho', 'perdido', 'desistiu', 'curioso'];
@@ -1008,26 +1024,30 @@ function setView(view) {
 
 // Escopo: "Atuais" (funil de drones dos leads novos) x "Recuperação" (clientes
 // antigos) x "Serviços" (pós-venda). Um botão troca o app inteiro entre os lotes.
-function atualizaEscopoSwitch(nAtuais, nRecup, nServ) {
+function atualizaEscopoSwitch(nAtuais, nRecup, nServ, nCurso) {
   $('#escAtuais').classList.toggle('active', escopo === 'atuais');
   $('#escRecup').classList.toggle('active', escopo === 'recuperacao');
   $('#escServ').classList.toggle('active', escopo === 'servicos');
+  $('#escCurso').classList.toggle('active', escopo === 'curso');
   document.body.classList.toggle('modo-recuperacao', escopo === 'recuperacao');
   document.body.classList.toggle('modo-servicos', escopo === 'servicos');
-  // no painel de Serviços as abas de funil de drone não se aplicam
-  $('#viewTabs').hidden = (escopo === 'servicos');
+  document.body.classList.toggle('modo-curso', escopo === 'curso');
+  // nos painéis de Serviços e do Curso as abas de funil de drone não se aplicam
+  $('#viewTabs').hidden = (escopo === 'servicos' || escopo === 'curso');
   const badge = (id, n) => { const b = $(id); if (b && n != null) { if (n > 0) { b.hidden = false; b.textContent = n; } else b.hidden = true; } };
   badge('#escRecupBadge', nRecup);
   badge('#escServBadge', nServ);
+  badge('#escCursoBadge', nCurso);
 }
 async function setEscopo(novo) {
   if (novo === escopo) return;
-  const saindoServicos = (escopo === 'servicos');
+  const saindoPainel = (escopo === 'servicos' || escopo === 'curso');
   escopo = novo;
-  atualizaEscopoSwitch();      // troca visual imediata (esconde abas de drone em Serviços)
-  // Serviços tem funil próprio; ao entrar/sair, ajusta a visão (mostra o board certo)
+  atualizaEscopoSwitch();      // troca visual imediata (esconde abas de drone nos painéis)
+  // Serviços e Curso têm funil próprio; ao entrar/sair, ajusta a visão
   if (novo === 'servicos') setView('servicos');
-  else if (saindoServicos) setView('produtor');
+  else if (novo === 'curso') setView('curso');
+  else if (saindoPainel) setView('produtor');
   await refreshAll();          // recarrega leads + stats no novo lote (atualiza os badges)
 }
 
@@ -1446,6 +1466,8 @@ function renderCard(lead) {
   if (escopo === 'servicos') {
     // no painel de Serviços o valor relevante é o do serviço (não o do drone)
     if (lead.valor_servico > 0) tags.append(el('span', 'tag valor serv', '🔧 ' + brl(lead.valor_servico)));
+  } else if (escopo === 'curso') {
+    if (lead.valor_curso > 0) tags.append(el('span', 'tag valor curso', '🎓 ' + brl(lead.valor_curso)));
   } else if (lead.valor > 0) {
     tags.append(el('span', 'tag valor', brl(lead.valor)));
   }
@@ -1552,8 +1574,8 @@ function renderCardMini(lead) {
     if (!dono) foot.append(el('span', 'tag mini-dono vazio', 'sem responsável'));
     else if (dono !== lead.vendedor) foot.append(el('span', 'tag mini-dono', (f.papel === 'sdr' ? '📞 ' : '👤 ') + dono));
   }
-  const valor = escopo === 'servicos' ? lead.valor_servico : lead.valor;
-  if (valor > 0) foot.append(el('span', 'tag valor' + (escopo === 'servicos' ? ' serv' : ''), brl(valor)));
+  const valor = escopo === 'servicos' ? lead.valor_servico : escopo === 'curso' ? lead.valor_curso : lead.valor;
+  if (valor > 0) foot.append(el('span', 'tag valor' + (escopo === 'servicos' ? ' serv' : escopo === 'curso' ? ' curso' : ''), brl(valor)));
   const ta = tempoAtendimento(lead);
   if (ta && !ta.atendido) foot.append(el('span', 'mini-wait', '⏳ ' + duracao(ta.ms)));
   if (foot.children.length) card.append(foot);
@@ -1709,7 +1731,7 @@ async function dropLead(id, lane, col, funil) {
   // a raia define quem é o dono neste funil (SDR ou vendedor)
   patch[funil.campo] = lane.isNone ? '' : lane.nome;
 
-  const before = { status: lead.status, sdr: lead.sdr, vendedor: lead.vendedor, tipo: lead.tipo, aguardando_resposta: lead.aguardando_resposta, cliente_respondeu: lead.cliente_respondeu, status_servico: lead.status_servico };
+  const before = { status: lead.status, sdr: lead.sdr, vendedor: lead.vendedor, tipo: lead.tipo, aguardando_resposta: lead.aguardando_resposta, cliente_respondeu: lead.cliente_respondeu, status_servico: lead.status_servico, status_curso: lead.status_curso };
   Object.assign(lead, patch);
   // encerrar o lead tira o alerta na hora (o servidor faz o mesmo no PATCH)
   if (['ganho', 'perdido', 'desistiu', 'curioso'].includes(lead.status)) { lead.aguardando_resposta = null; lead.cliente_respondeu = null; }
@@ -1784,6 +1806,8 @@ function openModal(lead) {
   if (form.recuperacao) form.recuperacao.checked = isNew ? (escopo === 'recuperacao') : !!lead.recuperacao;
   // painel de serviços (pós-venda) — lead novo criado nesse painel já entra nele
   if (form.em_servicos) form.em_servicos.checked = isNew ? (escopo === 'servicos') : !!lead.em_servicos;
+  // painel do curso — idem
+  if (form.em_curso) form.em_curso.checked = isNew ? (escopo === 'curso') : !!lead.em_curso;
 
   form.id.value = lead.id || '';
   // canal fora da lista fixa (ex.: utm_source cru vindo do webhook): injeta a
@@ -1792,7 +1816,7 @@ function openModal(lead) {
     form.origem_canal.append(new Option(lead.origem_canal, lead.origem_canal));
   }
   const fields = ['nome', 'telefone', 'email', 'regiao', 'area_cultivada', 'valor',
-    'cargo', 'decisor', 'decisor_cargo', 'status_servico', 'valor_servico',
+    'cargo', 'decisor', 'decisor_cargo', 'status_servico', 'valor_servico', 'status_curso', 'valor_curso',
     'campanha', 'utm_source', 'utm_medium', 'utm_campaign', 'utm_content', 'observacoes', 'origem_canal'];
   for (const f of fields) if (form[f]) form[f].value = lead[f] != null ? lead[f] : '';
   atualizaWaLead();
@@ -3065,6 +3089,7 @@ $('#tabMap').addEventListener('click', () => setView('map'));
 $('#escAtuais').addEventListener('click', () => setEscopo('atuais'));
 $('#escRecup').addEventListener('click', () => setEscopo('recuperacao'));
 $('#escServ').addEventListener('click', () => setEscopo('servicos'));
+$('#escCurso').addEventListener('click', () => setEscopo('curso'));
 
 // Novo: seletor do modo de visualização do quadro (Raias / Kanban / Lista)
 function setBoardView(v) {
@@ -3641,13 +3666,14 @@ function applyRoleUI() {
     $('#tabSDR').hidden = false;
     setView('produtor');
   }
-  // SDR fica SÓ na triagem: as abas de venda e o painel de Serviços somem
-  // (o servidor também bloqueia — aqui é só a interface acompanhar)
+  // SDR fica SÓ na triagem: as abas de venda e os painéis de Serviços e do
+  // Curso somem (o servidor também bloqueia — aqui é só a interface acompanhar)
   if (me.papel === 'sdr') {
     $('#tabProdutor').hidden = true;
     $('#tabPecuarista').hidden = true;
     $('#tabPrestador').hidden = true;
     $('#escServ').hidden = true;
+    $('#escCurso').hidden = true;
     setView('sdr');
   }
 }
