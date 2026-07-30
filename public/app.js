@@ -26,6 +26,7 @@ const COL = {
   q_prod: { key: 'q_prod', label: '🌾 → Produtores', patch: { status: 'qualificado', tipo: 'produtor' }, match: () => false, envia: 'Produtores' },
   q_pec: { key: 'q_pec', label: '🐄 → Pecuaristas', patch: { status: 'qualificado', tipo: 'pecuarista' }, match: () => false, envia: 'Pecuaristas' },
   q_prest: { key: 'q_prest', label: '🔧 → Prestadores', patch: { status: 'qualificado', tipo: 'prestador' }, match: () => false, envia: 'Prestadores' },
+  q_curso: { key: 'q_curso', label: '🎓 → Curso', patch: { status: 'qualificado', tipo: 'curso' }, match: () => false, envia: 'painel 🎓 Curso' },
   curioso: { key: 'curioso', label: '🧐 Só curioso', patch: { status: 'curioso', tipo: '' }, match: (l) => l.status === 'curioso' },
   perd_sdr: { key: 'perd_sdr', label: 'Perdido na triagem', patch: { status: 'perdido' }, match: (l) => l.status === 'perdido' && !l.tipo },
   recebido: { key: 'recebido', label: '📥 Recebido do SDR', patch: { status: 'qualificado' }, match: (l) => l.status === 'qualificado' },
@@ -43,7 +44,7 @@ const COL = {
 const FUNIS = {
   sdr: {
     papel: 'sdr', campo: 'sdr',
-    colunas: [COL.novo, COL.triagem, COL.q_prod, COL.q_pec, COL.q_prest, COL.curioso, COL.perd_sdr],
+    colunas: [COL.novo, COL.triagem, COL.q_prod, COL.q_pec, COL.q_prest, COL.q_curso, COL.curioso, COL.perd_sdr],
     inclui: (l) => ['novo', 'triagem'].includes(l.status || 'novo') || l.status === 'curioso' || (l.status === 'perdido' && !l.tipo),
   },
   produtor: {
@@ -440,6 +441,7 @@ async function loadStats() {
       { n: s.produtores || 0, l: '🌾 Produtores' },
       { n: s.pecuaristas || 0, l: '🐄 Pecuaristas' },
       { n: s.prestadores || 0, l: '🔧 Prestadores' },
+      { n: s.cursos || 0, l: '🎓 Curso' },
       { n: (s.por_status.ganho || {}).count || 0, l: '🏆 Ganhos' },
       { n: brl(s.valor_pipeline), l: '💰 Pipeline' },
     ];

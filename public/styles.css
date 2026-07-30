@@ -363,6 +363,8 @@ body.modo-recuperacao .toolbar { background: #fff7e8; box-shadow: inset 0 3px 0 
 .st-q_prod .dot { background: var(--green-500); }
 .st-q_prest .dot { background: #2f855a; }
 .st-perd_sdr .dot { background: var(--danger); }
+.st-q_curso .dot { background: #6b46c1; }
+.col-h.st-q_curso { background: #f3ecfe; }
 .st-curioso .dot { background: #a9885c; }
 .st-recebido .dot { background: var(--green-500); }
 .st-decidindo .dot { background: #b8860b; }
@@ -668,6 +670,7 @@ a.cw-btn, a.cw-btn:visited { text-decoration: none; color: #1f4b99; } /* é um L
 .seg-opt.produtor:has(input:checked) { border-color: var(--green-500); background: #eafaf0; }
 .seg-opt.pecuarista:has(input:checked) { border-color: #a1662f; background: #f6efe6; }
 .seg-opt.prestador:has(input:checked) { border-color: var(--amber); background: #fdf6e8; }
+.seg-opt.cursoseg:has(input:checked) { border-color: #6b46c1; background: #f3ecfe; }
 
 .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px 14px; }
 .grid .full { grid-column: 1 / -1; }

@@ -689,7 +689,7 @@ def apply_updates(lead, updates):
             continue
         if key == "status" and value not in STAGES:
             continue
-        if key == "tipo" and value not in ("", "produtor", "prestador", "pecuarista"):
+        if key == "tipo" and value not in ("", "produtor", "prestador", "pecuarista", "curso"):
             continue
         if key in ("telefone", "email") and not str(value or "").strip() and str(lead.get(key) or "").strip():
             campo = "Telefone" if key == "telefone" else "E-mail"
@@ -792,6 +792,11 @@ def apply_updates(lead, updates):
         lead["tipo"] = "produtor"
     if lead.get("tipo") and not lead.get("qualificado_em"):
         lead["qualificado_em"] = now_iso()
+    # CLASSIFICADO como Curso: o funil de venda dele e o do curso — entra
+    # sozinho no painel 🎓 (o invariante la embaixo poe a primeira etapa).
+    # So no ATO da classificacao: tirar do painel depois continua manual.
+    if updates.get("tipo") == "curso" and not lead.get("em_curso"):
+        lead["em_curso"] = True
     # Primeiro momento em que um vendedor assume o lead = "atendimento".
     if lead.get("vendedor") and not lead.get("atendido_em"):
         lead["atendido_em"] = now_iso()
@@ -1038,8 +1043,11 @@ def importar_csv(texto):
             st = dados.get("status", "").lower()
             lead["status"] = st if st in STAGES else "novo"
             tp = dados.get("tipo", "").lower()
-            if tp in ("produtor", "prestador", "pecuarista"):
+            if tp in ("produtor", "prestador", "pecuarista", "curso"):
                 lead["tipo"] = tp
+                if tp == "curso":  # classificado como curso ja entra no painel
+                    lead["em_curso"] = True
+                    lead["status_curso"] = CURSO_STAGES[0]
             elif lead["status"] in SALES_STAGES:
                 lead["tipo"] = "produtor"
             if lead.get("tipo"):
@@ -2512,6 +2520,7 @@ class Handler(BaseHTTPRequestHandler):
                 produtores = sum(1 for l in visiveis if l.get("tipo") == "produtor")
                 prestadores = sum(1 for l in visiveis if l.get("tipo") == "prestador")
                 pecuaristas = sum(1 for l in visiveis if l.get("tipo") == "pecuarista")
+                cursos = sum(1 for l in visiveis if l.get("tipo") == "curso")
                 aguardando = sum(1 for l in visiveis if l.get("aguardando_resposta"))
                 respondeu = sum(1 for l in visiveis if l.get("cliente_respondeu"))
                 _cad = cadencia_dias_cfg()
@@ -2525,6 +2534,7 @@ class Handler(BaseHTTPRequestHandler):
                     "produtores": produtores,
                     "prestadores": prestadores,
                     "pecuaristas": pecuaristas,
+                    "cursos": cursos,
                     "aguardando_resposta": aguardando,
                     "cliente_respondeu": respondeu,
                     "retornos": retornos,
@@ -2809,7 +2819,7 @@ class Handler(BaseHTTPRequestHandler):
                     return por_dia.setdefault(d, {
                         "dia": d, "recebidos": 0, "recebidos_chatwoot": 0,
                         "qualificados": 0, "produtores": 0, "prestadores": 0, "pecuaristas": 0,
-                        "ganhos": 0, "perdidos": 0, "desistidos": 0})
+                        "cursos": 0, "ganhos": 0, "perdidos": 0, "desistidos": 0})
 
                 for l in _db["leads"]:
                     if l.get("recuperacao"):
@@ -2830,6 +2840,8 @@ class Handler(BaseHTTPRequestHandler):
                             b["prestadores"] += 1
                         elif l.get("tipo") == "pecuarista":
                             b["pecuaristas"] += 1
+                        elif l.get("tipo") == "curso":
+                            b["cursos"] += 1
                     if l.get("status") == "ganho":
                         dg = dia_brt(l.get("ganho_em") or l.get("updated_at"))
                         if dg:
@@ -3012,7 +3024,7 @@ class Handler(BaseHTTPRequestHandler):
             vend = str(body.get("vendedor") or "").strip()
             if vend:
                 updates["vendedor"] = vend
-            if body.get("tipo") in ("produtor", "prestador", "pecuarista"):
+            if body.get("tipo") in ("produtor", "prestador", "pecuarista", "curso"):
                 updates["tipo"] = body["tipo"]
             if body.get("qualificar"):
                 updates["status"] = "qualificado"
