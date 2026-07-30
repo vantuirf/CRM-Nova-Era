@@ -879,3 +879,80 @@ label input:focus, label select:focus, label textarea:focus {
   .pay-box { grid-template-columns: 1fr; }
   .user-add, .camp-add, .team-add { grid-template-columns: 1fr; display: grid; }
 }
+
+
+/* ================= Novo visual do quadro: cards compactos + 3 modos ================= */
+.card.mini { padding: 7px 9px; }
+.mini-head { display: flex; align-items: center; gap: 6px; }
+.mini-name { font-weight: 700; font-size: 12.5px; line-height: 1.3; flex: 1; min-width: 0; }
+.mini-name .flag { margin-right: 3px; }
+.cw-icon {
+  flex-shrink: 0; width: 26px; height: 26px; display: inline-flex; align-items: center; justify-content: center;
+  border: 1px solid var(--line); border-radius: 7px; background: #fff;
+  text-decoration: none; font-size: 13px; cursor: pointer; padding: 0; font-family: inherit;
+}
+.cw-icon:hover { background: var(--green-100); border-color: var(--green-500); }
+.mini-alert { font-size: 10.5px; font-weight: 700; border-radius: 7px; padding: 2px 7px; margin-top: 4px; display: inline-block; }
+.mini-alert.respondeu { background: #ddf5e3; color: #1c6b3a; border: 1px solid #a9dfba; } /* verde = cliente respondeu (mesma cor do card grande) */
+.mini-alert.urgente { background: #fbe9e7; color: var(--danger); border: 1px solid #f0c4bd; }
+.mini-alert.pendente { background: #fdf6e3; color: var(--amber); border: 1px solid #f0d9a0; }
+.mini-meta { font-size: 11px; color: var(--muted); margin-top: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mini-foot { display: flex; align-items: center; gap: 5px; flex-wrap: wrap; margin-top: 5px; }
+.tag.mini-vend { background: var(--green-100); color: var(--green-600); }
+.tag.mini-dono { background: #e8f0fb; color: var(--blue); }
+.tag.mini-dono.vazio { background: #eef1f5; color: var(--muted); }
+.mini-wait { font-size: 10.5px; color: var(--amber); font-weight: 700; }
+
+/* barra "N pessoas sem leads" (raias vazias recolhidas) */
+.empty-lanes-bar { grid-column: 1 / -1; border-bottom: 1px solid var(--line); background: #fbfcfb; }
+.elb-inner {
+  position: sticky; left: 0; display: inline-flex; align-items: center; gap: 10px;
+  padding: 9px 14px; font-size: 12px; color: var(--muted); max-width: 100vw;
+}
+.btn-mini-ghost {
+  border: none; background: var(--green-100); color: var(--green-600);
+  font-weight: 700; font-size: 11.5px; padding: 4px 12px; border-radius: 9px; cursor: pointer; white-space: nowrap;
+}
+.btn-mini-ghost:hover { background: #d9efcf; }
+
+/* ---------- modo Kanban (colunas por etapa, urgentes no topo) ---------- */
+.swimboard.bv-kanban { gap: 10px; padding: 12px 14px; }
+.kb-col {
+  background: #eef2ee; border: 1px solid var(--line); border-radius: 12px; padding: 8px;
+  display: flex; flex-direction: column; gap: 7px; min-height: 140px; align-self: start;
+}
+.kb-col.drop-hover { background: var(--green-100); box-shadow: inset 0 0 0 2px var(--green-500); }
+.kb-col-h { display: flex; align-items: center; gap: 7px; font-weight: 700; font-size: 12.5px; padding: 2px 4px; }
+.kb-col-h .dot { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; background: #718096; }
+.kb-col-n { margin-left: auto; font-size: 11px; color: var(--muted); font-weight: 600; }
+.kb-urgente { background: #fbe9e7; border: 1px solid #f0c4bd; border-radius: 10px; padding: 6px 6px 0; }
+.kb-urgente-t { font-size: 9.5px; font-weight: 800; letter-spacing: 0.1em; text-transform: uppercase; color: var(--danger); padding: 0 2px 6px; }
+.kb-cards { min-height: 8px; }
+.kb-col .card { margin-bottom: 8px; }
+
+/* ---------- modo Lista (uma linha por lead, agrupado por pessoa) ---------- */
+.swimboard.bv-lista { display: block; min-width: 0; padding-bottom: 24px; }
+.lg-head { display: flex; align-items: center; gap: 8px; padding: 14px 16px 7px; font-size: 13.5px; font-weight: 700; }
+.lg-head.vazia { color: var(--muted); padding: 8px 16px; }
+.lg-n { margin-left: auto; font-size: 11.5px; color: var(--muted); font-weight: 600; }
+.list-row {
+  display: grid; grid-template-columns: 150px minmax(170px, 1.2fr) minmax(150px, 1fr) 150px 110px minmax(160px, 1fr) 40px;
+  gap: 0 10px; align-items: center; padding: 7px 16px;
+  border-top: 1px solid var(--line); background: var(--card); cursor: pointer;
+}
+.list-row:hover { background: var(--green-100); }
+.list-row.urgente-row { background: #fdf2f0; }
+.list-row.urgente-row:hover { background: #fbe9e7; }
+.lr-etapa { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; color: var(--muted); white-space: nowrap; overflow: hidden; }
+.lr-etapa .dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; background: #718096; }
+.lr-nome { font-weight: 700; font-size: 12.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.lr-mut { font-size: 11px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.lr-vend { min-width: 0; overflow: hidden; }
+.lr-alerta { font-size: 11px; font-weight: 700; color: var(--danger); white-space: nowrap; overflow: hidden; }
+.lr-ok { font-size: 11px; color: var(--muted); white-space: nowrap; overflow: hidden; }
+/* abaixo de 1040px as colunas fixas (~1022px somadas) não cabem e vazariam
+   para fora da linha — colapsa mais cedo para a versão compacta */
+@media (max-width: 1040px) {
+  .list-row { grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr) 34px; }
+  .list-row .lr-etapa, .list-row .lr-vend, .list-row .lr-mut { display: none; }
+}

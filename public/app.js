@@ -612,6 +612,14 @@ let cidadesGeo = {};   // "Nome - UF" -> [lat, lng] (centro do município, IBGE)
 let map = null;        // instância Leaflet (criada no 1º acesso à aba)
 let markersLayer = null;
 let currentView = 'sdr'; // 'sdr' | 'vendas' | 'map'
+// Novo: modo de visualização do quadro — 'raias' | 'kanban' | 'lista'.
+// Cada pessoa escolhe o seu; fica salvo no navegador.
+let boardView = 'raias';
+let mostrarRaiasVazias = false;
+try {
+  boardView = localStorage.getItem('crm_board_view') || 'raias';
+  mostrarRaiasVazias = localStorage.getItem('crm_raias_vazias') === '1';
+} catch (e) { /* navegação privada: usa o padrão */ }
 
 async function loadCidadesGeo() {
   try {
@@ -1187,9 +1195,12 @@ function renderBoard() {
   const funil = FUNIS[currentView] || FUNIS.sdr;
   const board = $('#swimboard');
   board.innerHTML = '';
+  board.className = 'swimboard bv-' + boardView;
+  const leadsFunil = leadsCache.filter(funil.inclui);
+  if (boardView === 'kanban') { renderBoardKanban(board, funil, leadsFunil); atualizaEstadoVazio(); return; }
+  if (boardView === 'lista') { renderBoardLista(board, funil, leadsFunil); atualizaEstadoVazio(); return; }
   board.style.gridTemplateColumns = `var(--lane-w) repeat(${funil.colunas.length}, var(--col-w))`;
 
-  const leadsFunil = leadsCache.filter(funil.inclui);
   let lanes = buildLanes(funil, leadsFunil);
   updateLaneFilter(lanes);
   const visibleLanes = currentFilters.lane ? lanes.filter((l) => l.key === currentFilters.lane) : lanes;
@@ -1202,14 +1213,25 @@ function renderBoard() {
     board.append(h);
   }
 
-  // Uma linha por raia
+  // Uma linha por raia — raias sem leads ficam recolhidas numa barra
+  const cheias = [];
+  const vazias = [];
   for (const lane of visibleLanes) {
     const laneLeads = leadsFunil.filter((l) => laneKeyForLead(l, funil) === lane.key);
+    // a PRÓPRIA raia do usuário nunca recolhe: é a área de trabalho dele e o
+    // alvo do arraste para assumir um lead da coluna "Sem responsável"
+    const minha = me && lane.key === me.nome;
+    if (!laneLeads.length && !lane.isNone && !currentFilters.lane && !minha) vazias.push(lane);
+    else cheias.push([lane, laneLeads]);
+  }
+  const linhas = mostrarRaiasVazias ? cheias.concat(vazias.map((l) => [l, []])) : cheias;
+  for (const [lane, laneLeads] of linhas) {
     board.append(renderLaneLabel(lane, funil));
     for (const col of funil.colunas) {
       board.append(renderCell(lane, col, laneLeads.filter(col.match), funil));
     }
   }
+  if (vazias.length) board.append(barraRaiasVazias(vazias.map((v) => v.nome)));
 
   if (members.length === 0 && me && me.papel === 'admin') {
     toastOnce('Crie os usuários da equipe em 👥 Usuários para ativar o rodízio de leads.');
@@ -1263,7 +1285,7 @@ function renderCell(lane, col, cellLeads, funil) {
   const cell = el('div', `cell st-${col.key}`);
   cell.dataset.lane = lane.key;
 
-  for (const lead of cellLeads) cell.append(renderCard(lead));
+  for (const lead of cellLeads) cell.append(renderCardMini(lead)); // card compacto (novo visual)
 
   cell.addEventListener('dragover', (e) => { e.preventDefault(); cell.classList.add('drop-hover'); });
   cell.addEventListener('dragleave', () => cell.classList.remove('drop-hover'));
@@ -1439,10 +1461,249 @@ function renderCard(lead) {
   return card;
 }
 
+// ---------------------------------------------------------------------------
+// Novo visual: card compacto + modos Kanban e Lista
+// ---------------------------------------------------------------------------
+// Resumo curto do alerta do lead (substitui as frases longas dentro do card)
+function alertaCurto(lead) {
+  const cr = clienteRespondeu(lead);
+  if (cr) return { cls: 'respondeu', txt: '💬 respondeu há ' + duracao(cr.ms) };
+  const ar = aguardaResposta(lead);
+  if (ar) {
+    return ar.urgente ? { cls: 'urgente', txt: '⏰ pendente há ' + duracao(ar.ms) }
+                      : { cls: 'pendente', txt: '📱 registrar resposta · ' + duracao(ar.ms) };
+  }
+  const rt = precisaRetorno(lead);
+  if (rt) {
+    return rt.nivel === 'quente' ? { cls: 'urgente', txt: '🔥 quente parado há ' + duracao(rt.ms) }
+                                 : { cls: 'pendente', txt: '📨 dar retorno · ' + duracao(rt.ms) };
+  }
+  return null;
+}
+
+// Botão do Chatwoot em forma de ícone (antes ocupava uma linha inteira)
+function cwIconLink(lead) {
+  if (lead.chatwoot_conversation_id) {
+    const urlCw = chatwootConvUrl(lead);
+    const b = document.createElement('a');
+    b.className = 'cw-icon'; b.textContent = '📨'; b.rel = 'noopener';
+    b.title = 'Atender no Chatwoot (abre a conversa e envia a saudação)';
+    if (urlCw) { b.href = urlCw; b.target = '_blank'; } else b.href = '#';
+    b.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (!urlCw) { e.preventDefault(); atenderNoChatwoot(lead); }
+      else atenderNoChatwoot(lead, true);
+    });
+    return b;
+  }
+  if (lead.telefone && !STATUS_ENCERRADOS.includes(lead.status) && settings.chatwoot_url && settings.chatwoot_account_id) {
+    const b = el('button', 'cw-icon conectar', '🔗');
+    b.type = 'button';
+    b.title = 'Conectar no Chatwoot (acha o cliente pelo telefone e envia a saudação)';
+    b.addEventListener('click', (e) => { e.stopPropagation(); atenderNoChatwoot(lead); });
+    return b;
+  }
+  return null;
+}
+
+// Card compacto: nome + alerta + 1 linha de contexto + rodapé. Tudo o mais na ficha.
+function renderCardMini(lead) {
+  const card = el('div', 'card mini' + (lead.status === 'ganho' ? ' won' : lead.status === 'perdido' ? ' lost' : lead.status === 'desistiu' ? ' gaveup' : lead.status === 'curioso' ? ' curioso' : ''));
+  card.draggable = true;
+  card.dataset.id = lead.id;
+
+  const head = el('div', 'mini-head');
+  const nome = el('span', 'mini-name');
+  const flag = lead.status === 'ganho' ? '🟢' : lead.status === 'curioso' ? '🧐' : lead.status === 'perdido' ? '🔴' : lead.status === 'desistiu' ? '🚫' : '';
+  if (flag) nome.append(el('span', 'flag', flag));
+  nome.append(document.createTextNode(lead.nome || '(sem nome)'));
+  const hz = heatEmoji(lead);
+  if (hz) {
+    const b = el('span', 'card-heat ' + heatLevel(lead), hz);
+    b.title = heatLevel(lead) === 'quente' ? 'Lead quente — várias atualizações recentes' : 'Atualização recente';
+    nome.append(b);
+  }
+  head.append(nome);
+  const cw = cwIconLink(lead);
+  if (cw) head.append(cw);
+  card.append(head);
+
+  const al = alertaCurto(lead);
+  if (al) card.append(el('div', 'mini-alert ' + al.cls, al.txt));
+
+  const bits = [];
+  const ms = Date.now() - new Date(lead.created_at).getTime();
+  if (isFinite(ms) && ms >= 0) bits.push('há ' + duracao(ms));
+  if (lead.regiao) bits.push(lead.regiao);
+  const pedido = resumoItens(lead);
+  if (pedido) bits.push(pedido);
+  if (bits.length) {
+    const meta = el('div', 'mini-meta', bits.join(' · '));
+    meta.title = bits.join(' · ');
+    card.append(meta);
+  }
+
+  const foot = el('div', 'mini-foot');
+  if (lead.vendedor) foot.append(el('span', 'tag mini-vend', '👤 ' + lead.vendedor));
+  if (boardView === 'kanban') {
+    // no Kanban não há raia — o dono aparece no card
+    const f = FUNIS[currentView] || FUNIS.sdr;
+    const dono = String(lead[f.campo] || '').trim();
+    if (!dono) foot.append(el('span', 'tag mini-dono vazio', 'sem responsável'));
+    else if (dono !== lead.vendedor) foot.append(el('span', 'tag mini-dono', (f.papel === 'sdr' ? '📞 ' : '👤 ') + dono));
+  }
+  const valor = escopo === 'servicos' ? lead.valor_servico : lead.valor;
+  if (valor > 0) foot.append(el('span', 'tag valor' + (escopo === 'servicos' ? ' serv' : ''), brl(valor)));
+  const ta = tempoAtendimento(lead);
+  if (ta && !ta.atendido) foot.append(el('span', 'mini-wait', '⏳ ' + duracao(ta.ms)));
+  if (foot.children.length) card.append(foot);
+
+  card.addEventListener('dragstart', (e) => {
+    e.dataTransfer.setData('text/plain', lead.id);
+    e.dataTransfer.effectAllowed = 'move';
+    card.classList.add('dragging');
+  });
+  card.addEventListener('dragend', () => card.classList.remove('dragging'));
+  card.addEventListener('click', () => openModal(lead));
+  return card;
+}
+
+// Barra "N pessoas sem leads" com botão Mostrar/Ocultar
+function barraRaiasVazias(nomes) {
+  const bar = el('div', 'empty-lanes-bar');
+  const inner = el('div', 'elb-inner');
+  inner.append(el('span', null, `${nomes.length} ${nomes.length > 1 ? 'pessoas' : 'pessoa'} sem leads — ${nomes.join(', ')}`));
+  const btn = el('button', 'btn-mini-ghost', mostrarRaiasVazias ? 'Ocultar' : 'Mostrar');
+  btn.type = 'button';
+  btn.title = mostrarRaiasVazias ? 'Recolher as raias sem leads'
+    : 'Mostrar as raias vazias — útil para arrastar um lead para alguém que está sem leads';
+  btn.addEventListener('click', () => {
+    mostrarRaiasVazias = !mostrarRaiasVazias;
+    try { localStorage.setItem('crm_raias_vazias', mostrarRaiasVazias ? '1' : '0'); } catch (e) {}
+    renderBoard();
+  });
+  inner.append(btn);
+  bar.append(inner);
+  return bar;
+}
+
+// Modo KANBAN: uma coluna por etapa, urgentes no topo. Arrastar muda a etapa
+// e mantém o dono atual do lead.
+function renderBoardKanban(board, funil, leadsFunil) {
+  board.style.gridTemplateColumns = `repeat(${funil.colunas.length}, var(--col-w))`;
+  const visiveis = currentFilters.lane
+    ? leadsFunil.filter((l) => laneKeyForLead(l, funil) === currentFilters.lane)
+    : leadsFunil;
+  for (const col of funil.colunas) {
+    const box = el('div', `kb-col st-${col.key}`);
+    const h = el('div', 'kb-col-h');
+    const leadsCol = visiveis.filter(col.match);
+    h.append(el('span', 'dot'), el('span', null, col.label), el('span', 'kb-col-n', String(leadsCol.length)));
+    box.append(h);
+    const urgentes = leadsCol.filter((l) => { const a = alertaCurto(l); return a && a.cls !== 'pendente'; });
+    if (urgentes.length) {
+      const uw = el('div', 'kb-urgente');
+      uw.append(el('div', 'kb-urgente-t', '⚠ Urgente'));
+      for (const l of urgentes) uw.append(renderCardMini(l));
+      box.append(uw);
+    }
+    const cards = el('div', 'kb-cards');
+    for (const l of leadsCol) { if (!urgentes.includes(l)) cards.append(renderCardMini(l)); }
+    box.append(cards);
+    box.addEventListener('dragover', (e) => { e.preventDefault(); box.classList.add('drop-hover'); });
+    box.addEventListener('dragleave', () => box.classList.remove('drop-hover'));
+    box.addEventListener('drop', (e) => {
+      e.preventDefault();
+      box.classList.remove('drop-hover');
+      dropLeadEtapa(e.dataTransfer.getData('text/plain'), col, funil);
+    });
+    board.append(box);
+  }
+}
+
+// Soltar no Kanban: muda só a etapa; o dono (SDR/vendedor) continua o mesmo
+async function dropLeadEtapa(id, col, funil) {
+  const lead = leadsCache.find((l) => l.id === id);
+  if (!lead) return;
+  const dono = String(lead[funil.campo] || '').trim();
+  dropLead(id, { isNone: !dono, nome: dono }, col, funil);
+}
+
+// Modo LISTA: uma linha por lead, agrupado por pessoa — denso, aguenta 30+ leads
+function renderBoardLista(board, funil, leadsFunil) {
+  board.style.gridTemplateColumns = '';
+  const lanes = buildLanes(funil, leadsFunil);
+  const visibleLanes = currentFilters.lane ? lanes.filter((l) => l.key === currentFilters.lane) : lanes;
+  const vazias = [];
+  for (const lane of visibleLanes) {
+    const laneLeads = leadsFunil.filter((l) => laneKeyForLead(l, funil) === lane.key);
+    if (!laneLeads.length) { if (!lane.isNone && !currentFilters.lane) vazias.push(lane); continue; }
+    // urgentes primeiro, depois na ordem das etapas
+    laneLeads.sort((a, b) => {
+      const ua = alertaCurto(a), ub = alertaCurto(b);
+      const pa = ua && ua.cls !== 'pendente' ? 0 : 1;
+      const pb = ub && ub.cls !== 'pendente' ? 0 : 1;
+      if (pa !== pb) return pa - pb;
+      return funil.colunas.findIndex((c) => c.match(a)) - funil.colunas.findIndex((c) => c.match(b));
+    });
+    const gh = el('div', 'lg-head');
+    gh.append(document.createTextNode(lane.nome));
+    gh.append(el('span', `role-badge ${lane.papel}`, lane.papel === 'sdr' ? 'SDR' : lane.papel === 'vendedor' ? 'Vendedor' : '—'));
+    gh.append(el('span', 'lg-n', laneLeads.length + (laneLeads.length > 1 ? ' leads' : ' lead')));
+    board.append(gh);
+    for (const lead of laneLeads) board.append(renderRowLista(lead, funil));
+  }
+  if (vazias.length) {
+    if (mostrarRaiasVazias) {
+      for (const lane of vazias) {
+        const gh = el('div', 'lg-head vazia');
+        gh.append(document.createTextNode(lane.nome));
+        gh.append(el('span', `role-badge ${lane.papel}`, lane.papel === 'sdr' ? 'SDR' : 'Vendedor'));
+        gh.append(el('span', 'lg-n', '0 leads'));
+        board.append(gh);
+      }
+    }
+    board.append(barraRaiasVazias(vazias.map((v) => v.nome)));
+  }
+}
+
+function renderRowLista(lead, funil) {
+  const al = alertaCurto(lead);
+  const row = el('div', 'list-row' + (al && al.cls !== 'pendente' ? ' urgente-row' : ''));
+  const col = funil.colunas.find((c) => c.match(lead));
+  const et = el('span', 'lr-etapa' + (col ? ` st-${col.key}` : ''));
+  et.append(el('span', 'dot'), document.createTextNode(col ? col.label : '—'));
+  row.append(et);
+  const nome = el('span', 'lr-nome', lead.nome || '(sem nome)');
+  if (lead.telefone) nome.title = lead.telefone;
+  row.append(nome);
+  const reg = [lead.regiao, resumoItens(lead)].filter(Boolean).join(' — ');
+  row.append(el('span', 'lr-mut', reg || '—'));
+  const vend = el('span', 'lr-vend');
+  if (lead.vendedor) vend.append(el('span', 'tag mini-vend', '👤 ' + lead.vendedor));
+  row.append(vend);
+  const ms = Date.now() - new Date(lead.created_at).getTime();
+  row.append(el('span', 'lr-mut lr-entrou', isFinite(ms) && ms >= 0 ? 'há ' + duracao(ms) : '—'));
+  if (al) row.append(el('span', al.cls === 'pendente' ? 'lr-ok' : 'lr-alerta', al.txt));
+  else {
+    const ta = tempoAtendimento(lead);
+    row.append(el('span', 'lr-ok', ta ? (ta.atendido ? '⏱ atendido em ' + duracao(ta.ms) : '⏳ aguardando há ' + duracao(ta.ms)) : ''));
+  }
+  const cw = cwIconLink(lead);
+  row.append(cw || el('span'));
+  row.addEventListener('click', () => openModal(lead));
+  return row;
+}
+
 // Arrastar um card para outra raia/etapa (dentro do funil ativo)
 async function dropLead(id, lane, col, funil) {
   const lead = leadsCache.find((l) => l.id === id);
   if (!lead) return;
+  // soltar no MESMO lugar não é mudança: sem PATCH — um no-op carimbaria
+  // updated_at e adiaria o alerta de retorno em silêncio
+  const donoAtual = String(lead[funil.campo] || '').trim();
+  const mesmoDono = lane.isNone ? !donoAtual : donoAtual === lane.nome;
+  if (mesmoDono && col.match(lead)) return;
 
   const patch = { ...col.patch };
   // a raia define quem é o dono neste funil (SDR ou vendedor)
@@ -2804,6 +3065,20 @@ $('#tabMap').addEventListener('click', () => setView('map'));
 $('#escAtuais').addEventListener('click', () => setEscopo('atuais'));
 $('#escRecup').addEventListener('click', () => setEscopo('recuperacao'));
 $('#escServ').addEventListener('click', () => setEscopo('servicos'));
+
+// Novo: seletor do modo de visualização do quadro (Raias / Kanban / Lista)
+function setBoardView(v) {
+  if (v === boardView) return;
+  boardView = v;
+  try { localStorage.setItem('crm_board_view', v); } catch (e) {}
+  atualizaBoardSwitch();
+  renderBoard();
+}
+function atualizaBoardSwitch() {
+  document.querySelectorAll('#boardViewSwitch .bv-opt').forEach((b) => b.classList.toggle('active', b.dataset.bv === boardView));
+}
+document.querySelectorAll('#boardViewSwitch .bv-opt').forEach((b) => b.addEventListener('click', () => setBoardView(b.dataset.bv)));
+atualizaBoardSwitch();
 
 // mudar o valor do lead recalcula as parcelas das formas de pagamento
 form.valor.addEventListener('input', updatePayTotal);
