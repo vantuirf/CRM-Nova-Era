@@ -1120,7 +1120,8 @@ def user_publico(u):
             "senha_definida": bool(u.get("senha_hash")),
             "senha_padrao": bool(u.get("senha_padrao")),
             "acesso_recuperacao": bool(u.get("acesso_recuperacao")),
-            "pode_recuperacao": pode_recuperacao(u)}
+            "pode_recuperacao": pode_recuperacao(u),
+            "recebe_leads": u.get("recebe_leads", True)}
 
 
 def settings_publico():
@@ -1499,13 +1500,26 @@ def active_members(papel=None):
 
 
 def next_sdr():
-    """Escolhe o proximo SDR no rodizio (round-robin). Retorna nome ou ''."""
-    sdrs = active_members("sdr")
+    """Escolhe o proximo SDR no rodizio (round-robin). Retorna nome ou ''.
+
+    So entram SDRs marcados como "recebe leads" (o administrador escolhe no
+    painel de equipe). Sem nenhum marcado, o lead novo fica sem responsavel —
+    visivel na coluna "Sem responsavel" da triagem.
+
+    O rodizio guarda o NOME do ultimo contemplado, nao um indice: como a lista
+    agora muda de tamanho toda hora (ligar/desligar SDR), um indice posicional
+    pularia ou repetiria alguem a cada mudanca — vies que se acumula."""
+    sdrs = [u.get("nome", "") for u in active_members("sdr") if u.get("recebe_leads", True)]
+    sdrs = [n for n in sdrs if n]
     if not sdrs:
         return ""
-    idx = _db.get("rr_sdr", 0) % len(sdrs)
-    _db["rr_sdr"] = (idx + 1) % len(sdrs)
-    return sdrs[idx].get("nome", "")
+    ultimo = _db.get("rr_sdr_ultimo") or ""
+    if ultimo in sdrs:
+        escolhido = sdrs[(sdrs.index(ultimo) + 1) % len(sdrs)]
+    else:
+        escolhido = sdrs[0]
+    _db["rr_sdr_ultimo"] = escolhido
+    return escolhido
 
 
 # ---------------------------------------------------------------------------
@@ -2399,6 +2413,8 @@ class Handler(BaseHTTPRequestHandler):
                             alvo["ativo"] = bool(body["ativo"])
                         if "acesso_recuperacao" in body:
                             alvo["acesso_recuperacao"] = bool(body["acesso_recuperacao"])
+                        if "recebe_leads" in body:
+                            alvo["recebe_leads"] = bool(body["recebe_leads"])
                         if body.get("senha"):
                             if len(str(body["senha"])) < 6:
                                 return self.send_json(400, {"error": "Senha muito curta (mínimo 6 caracteres)"})

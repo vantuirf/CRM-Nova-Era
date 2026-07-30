@@ -2600,6 +2600,25 @@ async function renderTeam() {
       row.append(rec);
     }
 
+    // rodízio dos leads novos do Chatwoot: o admin escolhe quais SDRs recebem
+    if (u.papel === 'sdr') {
+      const recebe = u.recebe_leads !== false;
+      const rl = el('button', 'recup-btn' + (recebe ? ' on' : ''),
+        recebe ? '📥 Recebe leads: sim' : '📥 Recebe leads: não');
+      rl.type = 'button';
+      rl.title = recebe
+        ? 'Está no rodízio: os leads novos do Chatwoot caem para este SDR — clique para tirar'
+        : 'Fora do rodízio: os leads novos vão para os outros SDRs marcados — clique para incluir';
+      rl.onclick = async () => {
+        try {
+          await api('/api/users/' + u.id, { method: 'PATCH', body: JSON.stringify({ recebe_leads: !recebe }) });
+          toast('Leads novos para ' + u.nome + (recebe ? ': não' : ': sim'));
+          renderTeam();
+        } catch (err) { toast('Erro: ' + err.message); }
+      };
+      row.append(rl);
+    }
+
     const senha = el('button', 'icon-btn', '🔑');
     senha.title = 'Definir nova senha';
     senha.type = 'button';
