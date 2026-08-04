@@ -1535,6 +1535,7 @@ function renderCard(lead) {
     // no painel de Serviços o valor relevante é o do serviço (não o do drone)
     if (lead.valor_servico > 0) tags.append(el('span', 'tag valor serv', '🔧 ' + brl(lead.valor_servico)));
   } else if (escopo === 'curso') {
+    if (lead.recuperacao) tags.append(el('span', 'tag', '🔄 Recuperação'));
     if (lead.valor_curso > 0) tags.append(el('span', 'tag valor curso', '🎓 ' + brl(lead.valor_curso)));
   } else if (lead.valor > 0) {
     tags.append(el('span', 'tag valor', brl(lead.valor)));
@@ -1642,6 +1643,8 @@ function renderCardMini(lead) {
     if (!dono) foot.append(el('span', 'tag mini-dono vazio', 'sem responsável'));
     else if (dono !== lead.vendedor) foot.append(el('span', 'tag mini-dono', (f.papel === 'sdr' ? '📞 ' : '👤 ') + dono));
   }
+  // no painel do Curso, lead antigo importado leva o selo de recuperação
+  if (escopo === 'curso' && lead.recuperacao) foot.append(el('span', 'tag', '🔄 Recuperação'));
   const valor = escopo === 'servicos' ? lead.valor_servico : escopo === 'curso' ? lead.valor_curso : lead.valor;
   if (valor > 0) foot.append(el('span', 'tag valor' + (escopo === 'servicos' ? ' serv' : escopo === 'curso' ? ' curso' : ''), brl(valor)));
   const ta = tempoAtendimento(lead);
@@ -3183,6 +3186,45 @@ async function acompanhaLote() {
     else if (st.terminado_em) { loadStats(); loadLeads().catch(() => {}); }
   } catch (_) { /* painel é gestor-only */ }
 }
+// ---- Importar leads ANTIGOS do Chatwoot do curso (lote de recuperação) ----
+let importCursoTimer = null;
+function renderImportCursoStatus(st) {
+  const box = $('#importCursoStatus');
+  box.hidden = false;
+  const partes = [
+    `${st.vistos || 0} conversa(s) verificadas`,
+    `🎓 ${st.criados || 0} lead(s) criados`,
+    `${st.ja_no_crm || 0} já estavam no CRM`,
+  ];
+  if (st.sem_contato) partes.push(`${st.sem_contato} sem telefone/e-mail (pulados)`);
+  if (st.falhas) partes.push(`⚠️ ${st.falhas} falha(s)`);
+  const cab = st.rodando ? '⏳ Importando do Chatwoot do curso… ' : (st.terminado_em ? '✅ Importação concluída: ' : '');
+  box.className = 'cw-teste' + (st.rodando || st.terminado_em ? (st.falhas ? ' falha' : ' ok') : '');
+  box.textContent = cab + partes.join(' · ') + (st.ultimo_erro ? ` — último erro: ${st.ultimo_erro}` : '');
+}
+async function acompanhaImportCurso() {
+  clearTimeout(importCursoTimer);
+  try {
+    const st = await api('/api/chatwoot/importar-curso'); // GET = progresso
+    renderImportCursoStatus(st);
+    if (st.rodando) importCursoTimer = setTimeout(acompanhaImportCurso, 2000);
+    else if (st.terminado_em) { loadStats(); loadLeads().catch(() => {}); }
+  } catch (_) { /* painel é gestor-only */ }
+}
+$('#btnImportarCurso').addEventListener('click', async () => {
+  if (!confirm('Importar TODOS os leads antigos do Chatwoot do curso?\n\n'
+    + '• O CRM vai varrer as conversas existentes lá e criar cada cliente como lead 🎓 de RECUPERAÇÃO, já conectado à conversa antiga.\n'
+    + '• Quem já está no CRM (mesma conversa, telefone ou e-mail) é pulado — não duplica.\n'
+    + '• NENHUMA mensagem será enviada.\n'
+    + '• Leva alguns minutos; dá pra acompanhar aqui no painel.')) return;
+  try {
+    const r = await api('/api/chatwoot/importar-curso', { method: 'POST' });
+    if (r.ja_rodando) toast('A importação já está rodando — acompanhe abaixo');
+    else toast('📥 Importação iniciada! Acompanhe o progresso abaixo');
+    acompanhaImportCurso();
+  } catch (err) { toast('⚠️ ' + err.message); }
+});
+
 $('#btnConectarTodos').addEventListener('click', async () => {
   if (!confirm('Conectar TODOS os leads da Recuperação ao Chatwoot?\n\n'
     + '• O CRM vai procurar cada cliente pelo telefone e vincular a conversa antiga dele (ou criar uma nova).\n'

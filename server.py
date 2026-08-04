@@ -1558,6 +1558,106 @@ def chatwoot_conectar(base, acc, token, inbox_id, nome, telefone):
 _conectar_lote = {"rodando": False, "total": 0, "feitos": 0, "conectados": 0,
                   "ja_tinham": 0, "falhas": 0, "ultimo_erro": None, "terminado_em": None}
 
+# Importacao dos leads ANTIGOS do Chatwoot do CURSO (lote de recuperacao):
+# varre todas as conversas existentes la e cria cada cliente como lead 🎓 de
+# recuperacao, ja conectado a conversa antiga. NUNCA envia mensagem.
+_importar_curso = {"rodando": False, "paginas": 0, "vistos": 0, "criados": 0,
+                   "ja_no_crm": 0, "sem_contato": 0, "falhas": 0,
+                   "ultimo_erro": None, "terminado_em": None}
+
+
+def _cw_lista_conversas(base, acc, token, pagina):
+    """Uma pagina da lista de conversas (todas, inclusive resolvidas)."""
+    url = "%s/api/v1/accounts/%s/conversations?status=all&page=%d" % (base, acc, pagina)
+    req = urllib.request.Request(url, headers=chatwoot_headers(token))
+    with _ABRIDOR_SEM_REDIRECT.open(req, timeout=20) as resp:
+        dados = json.loads(resp.read().decode("utf-8", "replace"))
+    if isinstance(dados, dict):
+        d = dados.get("data")
+        if isinstance(d, dict) and isinstance(d.get("payload"), list):
+            return d["payload"]
+        if isinstance(dados.get("payload"), list):
+            return dados["payload"]
+    return []
+
+
+def _roda_importar_curso(base, acc, token):
+    st = _importar_curso
+    try:
+        criados_sem_save = 0
+        esgotou_teto = True  # vira False quando as paginas ACABAM de verdade
+        for pagina in range(1, 401):  # teto de seguranca (~10.000 conversas)
+            if not st["rodando"]:
+                esgotou_teto = False
+                break
+            try:
+                convs = _cw_lista_conversas(base, acc, token, pagina)
+            except Exception as e:
+                st["falhas"] += 1
+                st["ultimo_erro"] = "Falha ao listar as conversas (%s)" % type(e).__name__
+                esgotou_teto = False
+                break
+            if not convs:
+                esgotou_teto = False
+                break  # acabaram as paginas
+            st["paginas"] = pagina
+            for c in convs:
+                if not st["rodando"] or not isinstance(c, dict):
+                    continue
+                st["vistos"] += 1
+                cid = c.get("display_id") if c.get("display_id") is not None else c.get("id")
+                s = str(cid).strip() if cid is not None else ""
+                cid = int(s) if s.isdigit() else None
+                sender = (c.get("meta") or {}).get("sender") or {}
+                nome = str(sender.get("name") or sender.get("pushname") or "").strip()
+                tel = str(sender.get("phone_number") or "").strip()
+                email = str(sender.get("email") or "").strip()
+                contato_id = sender.get("id")
+                if not tel and not email:
+                    st["sem_contato"] += 1  # sem como identificar/contatar
+                    continue
+                email_n = email.lower()
+                with _lock:
+                    ja = next((l for l in _db["leads"] if (
+                        (cid is not None and l.get("chatwoot_conversation_id") == cid
+                         and origem_do_lead(l) == "curso")
+                        or (tel and same_phone(l.get("telefone"), tel))
+                        or (email_n and str(l.get("email") or "").strip().lower() == email_n))), None)
+                    if ja:
+                        st["ja_no_crm"] += 1  # ja existe (conversa/telefone/e-mail)
+                        continue
+                    lead = make_lead({"source": "chatwoot", "nome": nome,
+                                      "telefone": tel, "email": email})
+                    lead["recuperacao"] = True
+                    lead["tipo"] = "curso"
+                    lead["em_curso"] = True
+                    lead["status_curso"] = CURSO_STAGES[0]
+                    lead["chatwoot_origem"] = "curso"
+                    lead["qualificado_em"] = now_iso()
+                    if cid is not None:
+                        lead["chatwoot_conversation_id"] = cid
+                    if contato_id is not None:
+                        lead["chatwoot_contact_id"] = contato_id
+                    registra_hist(lead, "Sistema",
+                                  ["🎓 Lead antigo importado do Chatwoot do curso (lote de recuperação)"])
+                    _db["leads"].append(lead)
+                    st["criados"] += 1
+                    criados_sem_save += 1
+                    if criados_sem_save >= 10:
+                        save_db()
+                        criados_sem_save = 0
+            time.sleep(0.15)  # nao martelar a API do Chatwoot
+        if esgotou_teto:
+            # parou no teto com paginas sobrando: NAO pode parecer completo
+            st["falhas"] += 1
+            st["ultimo_erro"] = ("Parei no limite de segurança (%d conversas verificadas) — "
+                                 "o Chatwoot ainda tinha mais conversas além dessas" % st["vistos"])
+    finally:
+        with _lock:
+            save_db()
+        st["rodando"] = False
+        st["terminado_em"] = now_iso()
+
 
 def _roda_conectar_lote(base, acc, token, inbox):
     st = _conectar_lote
@@ -2658,14 +2758,18 @@ class Handler(BaseHTTPRequestHandler):
                 n_recuperacao = sum(1 for l in todos_visiveis if l.get("recuperacao")) if pode_rec else 0
                 n_servicos = sum(1 for l in todos_visiveis if l.get("em_servicos")) \
                     if user["papel"] != "sdr" else 0
-                n_curso = sum(1 for l in todos_visiveis if l.get("em_curso")) \
+                n_curso = sum(1 for l in todos_visiveis if l.get("em_curso")
+                              and (not l.get("recuperacao") or pode_rec
+                                   or user["nome"] in (l.get("vendedor"), l.get("responsavel")))) \
                     if user["papel"] != "sdr" else 0
                 n_atuais = sum(1 for l in todos_visiveis if not l.get("recuperacao"))
                 if escopo == "servicos":
                     visiveis = [l for l in todos_visiveis if l.get("em_servicos")] \
                         if user["papel"] != "sdr" else []
                 elif escopo == "curso":
-                    visiveis = [l for l in todos_visiveis if l.get("em_curso")] \
+                    visiveis = [l for l in todos_visiveis if l.get("em_curso")
+                                and (not l.get("recuperacao") or pode_rec
+                                     or user["nome"] in (l.get("vendedor"), l.get("responsavel")))] \
                         if user["papel"] != "sdr" else []
                 elif escopo == "recuperacao":
                     visiveis = [l for l in todos_visiveis if l.get("recuperacao")] if pode_rec else []
@@ -2927,6 +3031,28 @@ class Handler(BaseHTTPRequestHandler):
 
         # Conectar TODOS os leads da recuperacao (lote, em segundo plano).
         # POST inicia; GET acompanha o progresso. So vincula — nao manda mensagem.
+        # Importar leads ANTIGOS do Chatwoot do CURSO (lote de recuperacao).
+        # POST inicia; GET acompanha. So cria/vincula — NAO envia mensagem.
+        if path == "/api/chatwoot/importar-curso" and method == "GET":
+            if not gestor:
+                return self.send_json(403, {"error": "Disponível só para gerente/administrador"})
+            return self.send_json(200, dict(_importar_curso))
+
+        if path == "/api/chatwoot/importar-curso" and method == "POST":
+            if not gestor:
+                return self.send_json(403, {"error": "Disponível só para gerente/administrador"})
+            base, acc, token, _s = chatwoot_cfg("curso")
+            if not (base and acc and token):
+                return self.send_json(400, {"error": "Configure o Chatwoot do curso acima (endereço, conta e token) antes"})
+            with _lock:
+                if _importar_curso["rodando"]:
+                    return self.send_json(200, dict(_importar_curso, iniciado=False, ja_rodando=True))
+                _importar_curso.update({"rodando": True, "paginas": 0, "vistos": 0,
+                                        "criados": 0, "ja_no_crm": 0, "sem_contato": 0,
+                                        "falhas": 0, "ultimo_erro": None, "terminado_em": None})
+            threading.Thread(target=_roda_importar_curso, args=(base, acc, token), daemon=True).start()
+            return self.send_json(200, dict(_importar_curso, iniciado=True))
+
         if path == "/api/chatwoot/conectar-todos" and method == "GET":
             if not gestor:
                 return self.send_json(403, {"error": "Disponível só para gerente/administrador"})
@@ -3231,8 +3357,15 @@ class Handler(BaseHTTPRequestHandler):
                 # painel de Servicos e trabalho de vendedor — SDR nao acessa
                 leads = [l for l in leads if l.get("em_servicos")] if user["papel"] != "sdr" else []
             elif escopo == "curso":
-                # painel do Curso idem — venda e trabalho de vendedor
-                leads = [l for l in leads if l.get("em_curso")] if user["papel"] != "sdr" else []
+                # painel do Curso idem — venda e trabalho de vendedor. Leads de
+                # RECUPERACAO do curso respeitam a liberacao por pessoa — mas o
+                # DONO do lead sempre ve o proprio lead (senao o gestor atribui
+                # e o responsavel fica cego para ele).
+                pode_rec_c = pode_recuperacao(user)
+                leads = [l for l in leads if l.get("em_curso")
+                         and (not l.get("recuperacao") or pode_rec_c
+                              or user["nome"] in (l.get("vendedor"), l.get("responsavel")))] \
+                    if user["papel"] != "sdr" else []
             elif escopo == "recuperacao":
                 # só quem tem acesso liberado vê a Recuperação
                 leads = [l for l in leads if l.get("recuperacao")] if pode_recuperacao(user) else []
