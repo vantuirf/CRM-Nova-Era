@@ -102,6 +102,55 @@ FUNIS.curso = {
   inclui: (l) => !!l.em_curso,
 };
 
+// ---------------------------------------------------------------------------
+// Etapas EDITÁVEIS: o servidor manda as listas resolvidas (chave+nome+fixa) e
+// aqui remontamos as colunas dos funis — renomeadas, criadas ou excluídas.
+// ---------------------------------------------------------------------------
+let ETAPAS_CFG = null;
+const PALETA_ETAPAS = ['#0ea5e9', '#f97316', '#14b8a6', '#e11d48', '#8b5cf6', '#84cc16', '#f59e0b', '#64748b'];
+function aplicaEtapas(et) {
+  if (!et || !et.vendas || !et.vendas.length) return;
+  ETAPAS_CFG = et;
+  // Só sobrescreve rótulo quando o GESTOR renomeou (ou criou a etapa) — os
+  // nomes padrão da interface (emojis, dicas "(SDR)/(Vendas)") ficam intactos.
+  const lbl = {};
+  for (const e of [...et.vendas, ...(et.servicos || []), ...(et.curso || [])]) {
+    if (e.renomeada) lbl[e.key] = e.label;
+  }
+  for (const k of Object.keys(COL)) if (lbl[k]) COL[k].label = lbl[k];
+  for (const e of et.vendas) if (e.renomeada) STAGE_LABELS[e.key] = e.label;
+  // miolo do funil de vendas (entre "Recebido do SDR" e "Ganho")
+  const meio = et.vendas.filter((e) => !e.fixa);
+  // o filtro de pertencimento dos funis usa SALES — precisa acompanhar as
+  // etapas criadas/excluídas, senão lead em etapa nova SOME do quadro
+  SALES.length = 0;
+  SALES.push('qualificado', ...meio.map((e) => e.key), 'ganho');
+  const colMeio = meio.map((e, i) => COL[e.key]
+    ? COL[e.key]
+    : { key: e.key, label: e.label, patch: { status: e.key }, match: (l) => l.status === e.key, cor: PALETA_ETAPAS[i % PALETA_ETAPAS.length] });
+  for (const f of ['produtor', 'pecuarista', 'prestador']) {
+    FUNIS[f].colunas = [COL.recebido, ...colMeio, COL.ganho, COL.desistiu, COL.perdido];
+  }
+  // Serviços e Curso: a lista completa vem do servidor
+  const colDe = (SET, campo) => (e, i) => {
+    if (SET[e.key]) { SET[e.key].label = e.label; return SET[e.key]; }
+    return { key: e.key, label: e.label, patch: { [campo]: e.key }, match: (l) => l[campo] === e.key, cor: PALETA_ETAPAS[i % PALETA_ETAPAS.length] };
+  };
+  if (et.servicos && et.servicos.length) FUNIS.servicos.colunas = et.servicos.map(colDe(SCOL, 'status_servico'));
+  if (et.curso && et.curso.length) FUNIS.curso.colunas = et.curso.map(colDe(KCOL, 'status_curso'));
+  // selects fixos da ficha (Serviços/Curso) ganham as opções atuais
+  const remonta = (sel, lista) => {
+    if (!sel || !lista) return;
+    const cur = sel.value;
+    sel.innerHTML = '';
+    sel.append(new Option('—', ''));
+    for (const e of lista) sel.append(new Option(e.label, e.key));
+    sel.value = cur;
+  };
+  remonta(form && form.status_servico, et.servicos);
+  remonta(form && form.status_curso, et.curso);
+}
+
 let leadsCache = [];
 let primeiroLoadFeito = false; // só avisa "nada encontrado" depois do 1º carregamento
 let members = [];
@@ -433,6 +482,9 @@ async function loadStats() {
     // base do Chatwoot chega a todos (não é segredo) p/ montar o link da conversa
     if ('chatwoot_url' in s) settings.chatwoot_url = s.chatwoot_url;
     if ('chatwoot_account_id' in s) settings.chatwoot_account_id = s.chatwoot_account_id;
+    if ('curso_chatwoot_url' in s) settings.curso_chatwoot_url = s.curso_chatwoot_url;
+    if ('curso_chatwoot_account_id' in s) settings.curso_chatwoot_account_id = s.curso_chatwoot_account_id;
+    aplicaEtapas(s.etapas); // etapas renomeadas/criadas/excluídas pelo gestor
     atualizaEscopoSwitch(s.atuais_total, s.recuperacao_total, s.servicos_total, s.curso_total);
     const box = $('#stats');
     box.innerHTML = '';
@@ -802,9 +854,15 @@ async function registrarContatoWhatsapp(id) {
 
 // ---- Atender no Chatwoot (canal OFICIAL — não usa o WhatsApp pessoal) ----
 // Monta a URL da conversa no Chatwoot (para abrir em outra aba)
+// Config do Chatwoot conforme a instância do lead ("" = drones, "curso")
+function cwConfigDoLead(lead) {
+  if (lead && lead.chatwoot_origem === 'curso') {
+    return { base: String(settings.curso_chatwoot_url || '').replace(/\/$/, ''), acc: settings.curso_chatwoot_account_id };
+  }
+  return { base: String(settings.chatwoot_url || '').replace(/\/$/, ''), acc: settings.chatwoot_account_id };
+}
 function chatwootConvUrl(lead) {
-  const base = String(settings.chatwoot_url || '').replace(/\/$/, '');
-  const acc = settings.chatwoot_account_id;
+  const { base, acc } = cwConfigDoLead(lead);
   const conv = lead && lead.chatwoot_conversation_id;
   if (!base || !acc || !conv) return null;
   return `${base}/app/accounts/${acc}/conversations/${conv}`;
@@ -823,9 +881,15 @@ function atenderNoChatwoot(lead, jaAbriu) {
   if (!jaAbriu && url) window.open(url, '_blank', 'noopener');
   api('/api/leads/' + encodeURIComponent(lead.id) + '/chatwoot', { method: 'POST' })
     .then((res) => {
-      // guarda a base p/ os próximos cliques abrirem a aba na hora
-      if (res.chatwoot_url) settings.chatwoot_url = res.chatwoot_url;
-      if (res.chatwoot_account_id) settings.chatwoot_account_id = res.chatwoot_account_id;
+      // guarda a base p/ os próximos cliques abrirem a aba na hora — na
+      // instância CERTA (lead do curso não pode sobrescrever a dos drones)
+      if (lead.chatwoot_origem === 'curso') {
+        if (res.chatwoot_url) settings.curso_chatwoot_url = res.chatwoot_url;
+        if (res.chatwoot_account_id) settings.curso_chatwoot_account_id = res.chatwoot_account_id;
+      } else {
+        if (res.chatwoot_url) settings.chatwoot_url = res.chatwoot_url;
+        if (res.chatwoot_account_id) settings.chatwoot_account_id = res.chatwoot_account_id;
+      }
       // lead recém-CONECTADO: atualiza o cache já — o botão vira o link real
       if (res.lead) {
         const l2 = leadsCache.find((x) => x.id === lead.id);
@@ -953,7 +1017,7 @@ function renderMap() {
       cw.title = 'Atender pelo canal oficial (com saudação automática)';
       cw.onclick = () => atenderNoChatwoot(lead);
       acoes.append(cw);
-    } else if (lead.telefone && !STATUS_ENCERRADOS.includes(lead.status) && settings.chatwoot_url && settings.chatwoot_account_id) {
+    } else if (lead.telefone && !STATUS_ENCERRADOS.includes(lead.status) && cwConfigDoLead(lead).base && cwConfigDoLead(lead).acc) {
       // sem conversa ainda: conecta (acha/cria lá e sauda) direto do mapa
       const cw = el('button', 'pp-btn cw conectar', '🔗 Conectar no Chatwoot');
       cw.type = 'button';
@@ -1231,7 +1295,9 @@ function renderBoard() {
   board.append(el('div', 'corner'));
   for (const col of funil.colunas) {
     const h = el('div', `col-h st-${col.key}`);
-    h.append(el('span', 'dot'), document.createTextNode(col.label));
+    const dot = el('span', 'dot');
+    if (col.cor) dot.style.background = col.cor; // etapa criada pelo gestor
+    h.append(dot, document.createTextNode(col.label));
     board.append(h);
   }
 
@@ -1322,7 +1388,7 @@ function renderCell(lane, col, cellLeads, funil) {
 
 function renderCard(lead) {
   const card = el('div', 'card' + (lead.status === 'ganho' ? ' won' : lead.status === 'perdido' ? ' lost' : lead.status === 'desistiu' ? ' gaveup' : lead.status === 'curioso' ? ' curioso' : ''));
-  card.draggable = true;
+  card.draggable = podeMover(); // bloqueado só consulta
   card.dataset.id = lead.id;
 
   const nome = el('div', 'name');
@@ -1395,7 +1461,7 @@ function renderCard(lead) {
     });
     r.append(b);
     card.append(r);
-  } else if (lead.telefone && !STATUS_ENCERRADOS.includes(lead.status) && settings.chatwoot_url && settings.chatwoot_account_id) {
+  } else if (lead.telefone && !STATUS_ENCERRADOS.includes(lead.status) && cwConfigDoLead(lead).base && cwConfigDoLead(lead).acc) {
     // lead SEM conversa (recuperação/importado): o CRM acha o cliente no
     // Chatwoot pelo telefone, REUSA a conversa antiga (ou cria) e já sauda
     const r = el('div', 'row');
@@ -1520,7 +1586,7 @@ function cwIconLink(lead) {
     });
     return b;
   }
-  if (lead.telefone && !STATUS_ENCERRADOS.includes(lead.status) && settings.chatwoot_url && settings.chatwoot_account_id) {
+  if (lead.telefone && !STATUS_ENCERRADOS.includes(lead.status) && cwConfigDoLead(lead).base && cwConfigDoLead(lead).acc) {
     const b = el('button', 'cw-icon conectar', '🔗');
     b.type = 'button';
     b.title = 'Conectar no Chatwoot (acha o cliente pelo telefone e envia a saudação)';
@@ -1533,7 +1599,7 @@ function cwIconLink(lead) {
 // Card compacto: nome + alerta + 1 linha de contexto + rodapé. Tudo o mais na ficha.
 function renderCardMini(lead) {
   const card = el('div', 'card mini' + (lead.status === 'ganho' ? ' won' : lead.status === 'perdido' ? ' lost' : lead.status === 'desistiu' ? ' gaveup' : lead.status === 'curioso' ? ' curioso' : ''));
-  card.draggable = true;
+  card.draggable = podeMover(); // bloqueado só consulta
   card.dataset.id = lead.id;
 
   const head = el('div', 'mini-head');
@@ -1622,7 +1688,9 @@ function renderBoardKanban(board, funil, leadsFunil) {
     const box = el('div', `kb-col st-${col.key}`);
     const h = el('div', 'kb-col-h');
     const leadsCol = visiveis.filter(col.match);
-    h.append(el('span', 'dot'), el('span', null, col.label), el('span', 'kb-col-n', String(leadsCol.length)));
+    const kdot = el('span', 'dot');
+    if (col.cor) kdot.style.background = col.cor; // etapa criada pelo gestor
+    h.append(kdot, el('span', null, col.label), el('span', 'kb-col-n', String(leadsCol.length)));
     box.append(h);
     const urgentes = leadsCol.filter((l) => { const a = alertaCurto(l); return a && a.cls !== 'pendente'; });
     if (urgentes.length) {
@@ -1696,7 +1764,9 @@ function renderRowLista(lead, funil) {
   const row = el('div', 'list-row' + (al && al.cls !== 'pendente' ? ' urgente-row' : ''));
   const col = funil.colunas.find((c) => c.match(lead));
   const et = el('span', 'lr-etapa' + (col ? ` st-${col.key}` : ''));
-  et.append(el('span', 'dot'), document.createTextNode(col ? col.label : '—'));
+  const ldot = el('span', 'dot');
+  if (col && col.cor) ldot.style.background = col.cor;
+  et.append(ldot, document.createTextNode(col ? col.label : '—'));
   row.append(et);
   const nome = el('span', 'lr-nome', lead.nome || '(sem nome)');
   if (lead.telefone) nome.title = lead.telefone;
@@ -1720,9 +1790,15 @@ function renderRowLista(lead, funil) {
 }
 
 // Arrastar um card para outra raia/etapa (dentro do funil ativo)
+// Permissão individual de mover etapas (admin/gerente sempre podem)
+function podeMover() {
+  return !me || me.papel === 'admin' || me.papel === 'gerente' || me.pode_mover !== false;
+}
+
 async function dropLead(id, lane, col, funil) {
   const lead = leadsCache.find((l) => l.id === id);
   if (!lead) return;
+  if (!podeMover()) { toast('Mover etapas está bloqueado para você — fale com o administrador'); return; }
   // soltar no MESMO lugar não é mudança: sem PATCH — um no-op carimbaria
   // updated_at e adiaria o alerta de retorno em silêncio
   const donoAtual = String(lead[funil.campo] || '').trim();
@@ -1790,6 +1866,14 @@ function openModal(lead) {
   st.innerHTML = '';
   for (const s of STAGES) st.append(new Option(STAGE_LABELS[s] || s, s));
   st.value = lead.status || 'novo';
+  // bloqueado de mover etapas: selects de etapa, painéis e classificação
+  // ficam só-leitura (mexer neles também move o lead de coluna/funil)
+  st.disabled = !podeMover();
+  if (form.status_servico) form.status_servico.disabled = !podeMover();
+  if (form.status_curso) form.status_curso.disabled = !podeMover();
+  if (form.em_servicos) form.em_servicos.disabled = !podeMover();
+  if (form.em_curso) form.em_curso.disabled = !podeMover();
+  for (const r of form.querySelectorAll('[name=tipo]')) r.disabled = !podeMover();
 
   // select de campanha cadastrada (se o vínculo apontar para campanha que não
   // está na lista, injeta a opção para o valor não se perder num Salvar)
@@ -1825,7 +1909,7 @@ function openModal(lead) {
   // "Atender no Chatwoot": com conversa vinculada é um link real (o navegador
   // abre a aba sem pop-up); sem conversa vira "Conectar" (acha/cria lá e sauda)
   const cwEl = $('#cwLead');
-  const cwPodeConectar = !!(lead.telefone && !STATUS_ENCERRADOS.includes(lead.status) && settings.chatwoot_url && settings.chatwoot_account_id);
+  const cwPodeConectar = !!(lead.telefone && !STATUS_ENCERRADOS.includes(lead.status) && cwConfigDoLead(lead).base && cwConfigDoLead(lead).acc);
   cwEl.hidden = !(lead.chatwoot_conversation_id || (cwPodeConectar && !isNew));
   cwEl.textContent = lead.chatwoot_conversation_id ? '📨 Atender no Chatwoot' : '🔗 Conectar no Chatwoot';
   const cwHref = chatwootConvUrl(lead);
@@ -1834,7 +1918,8 @@ function openModal(lead) {
   // painel 💬 Conversa (Chatwoot): ver o que o cliente mandou e responder
   // (texto/imagem/áudio/vídeo) sem sair do CRM. Vale também para lead
   // encerrado (mensagem manual é deliberada — ex.: pós-venda).
-  const cwTemCanal = !!(settings.chatwoot_url && settings.chatwoot_account_id
+  const cwCfgLead = cwConfigDoLead(lead);
+  const cwTemCanal = !!(cwCfgLead.base && cwCfgLead.acc
     && (lead.chatwoot_conversation_id || lead.telefone));
   $('#chatPanel').hidden = isNew || !cwTemCanal;
   $('#cwMsgTexto').value = ''; // rascunho é por-lead: limpa ao abrir outro
@@ -2461,6 +2546,13 @@ function renderCampaigns() {
   $('#cwToken').value = '';
   $('#cwToken').placeholder = settings.chatwoot_token_definido ? '••••••• (já salvo — cole p/ trocar)' : 'cole o token aqui';
   $('#cwSaudacao').value = settings.chatwoot_saudacao || '';
+  // Chatwoot do CURSO (instância separada)
+  $('#cwCursoUrl').value = settings.curso_chatwoot_url || '';
+  $('#cwCursoAccount').value = settings.curso_chatwoot_account_id || '';
+  $('#cwCursoInbox').value = settings.curso_chatwoot_inbox_id || '';
+  $('#cwCursoToken').value = '';
+  $('#cwCursoToken').placeholder = settings.curso_chatwoot_token_definido ? '••••••• (já salvo — cole p/ trocar)' : 'cole o token aqui';
+  $('#cwCursoSaudacao').value = settings.curso_chatwoot_saudacao || '';
   const list = $('#campList');
   list.innerHTML = '';
   if (campaigns.length === 0) {
@@ -2602,6 +2694,41 @@ async function testarChatwoot() {
   }
 }
 $('#btnTestCw').addEventListener('click', testarChatwoot);
+
+// ---- Chatwoot do CURSO: salvar e testar (mesmo fluxo, instância própria) ----
+$('#btnSaveCwCurso').addEventListener('click', async () => {
+  const body = {
+    curso_chatwoot_url: $('#cwCursoUrl').value,
+    curso_chatwoot_account_id: $('#cwCursoAccount').value,
+    curso_chatwoot_inbox_id: $('#cwCursoInbox').value,
+    curso_chatwoot_saudacao: $('#cwCursoSaudacao').value,
+  };
+  const tok = $('#cwCursoToken').value.trim();
+  if (tok) body.curso_chatwoot_token = tok; // não sobrescrever o token salvo com vazio
+  try {
+    await api('/api/settings', { method: 'PATCH', body: JSON.stringify(body) });
+    await loadCampaigns(); renderCampaigns();
+    await loadStats();
+    toast('✅ Chatwoot do curso salvo — testando a conexão…');
+    testarChatwootCurso();
+  } catch (err) { toast('Erro: ' + err.message); }
+});
+
+async function testarChatwootCurso() {
+  const box = $('#cwCursoTesteBox');
+  box.hidden = false;
+  box.className = 'cw-teste';
+  box.textContent = '⏳ Testando a conexão com o Chatwoot do curso…';
+  try {
+    const r = await api('/api/chatwoot/teste', { method: 'POST', body: JSON.stringify({ origem: 'curso' }) });
+    box.textContent = r.mensagem;
+    box.className = 'cw-teste ' + (r.ok ? 'ok' : 'falha');
+  } catch (err) {
+    box.textContent = '❌ ' + err.message;
+    box.className = 'cw-teste falha';
+  }
+}
+$('#btnTestCwCurso').addEventListener('click', testarChatwootCurso);
 
 // ---- Painel de Alertas (prazos configuráveis) ----
 function abrirCfgAlertas() {
@@ -2920,6 +3047,25 @@ async function renderTeam() {
       row.append(rec);
     }
 
+    // permissão individual de MOVER leads de etapa (qualquer funil)
+    if (u.papel === 'sdr' || u.papel === 'vendedor') {
+      const move = u.pode_mover !== false;
+      const pm = el('button', 'recup-btn' + (move ? ' on' : ''),
+        move ? '🧭 Move etapas: sim' : '🧭 Move etapas: não');
+      pm.type = 'button';
+      pm.title = move
+        ? 'Pode arrastar cards e mudar etapas — clique para bloquear (a pessoa só consulta e registra notas)'
+        : 'Bloqueado: só consulta e registra notas — clique para liberar';
+      pm.onclick = async () => {
+        try {
+          await api('/api/users/' + u.id, { method: 'PATCH', body: JSON.stringify({ pode_mover: !move }) });
+          toast('Mover etapas para ' + u.nome + (move ? ': bloqueado' : ': liberado'));
+          renderTeam();
+        } catch (err) { toast('Erro: ' + err.message); }
+      };
+      row.append(pm);
+    }
+
     // rodízio dos leads novos do Chatwoot: o admin escolhe quais SDRs recebem
     if (u.papel === 'sdr') {
       const recebe = u.recebe_leads !== false;
@@ -3055,6 +3201,7 @@ async function loadWebhookInfo() {
   try {
     const info = await api('/api/webhook-info');
     $('#whUrl').value = info.url || '';
+    $('#whCursoUrl').value = info.url_curso || '';
     const st = $('#whStatus');
     st.hidden = false;
     if (info.total_chatwoot > 0) {
@@ -3084,11 +3231,98 @@ $('#btnCopiarWh').addEventListener('click', async () => {
     toast('📋 Endereço copiado');
   }
 });
+$('#btnCopiarWhCurso').addEventListener('click', async () => {
+  const v = $('#whCursoUrl').value;
+  if (!v) { toast('Abra o painel de novo — o endereço ainda não carregou'); return; }
+  try {
+    await navigator.clipboard.writeText(v);
+    toast('📋 Endereço copiado — cole no Chatwoot do CURSO (Integrações → Webhooks)');
+  } catch (_) {
+    $('#whCursoUrl').select();
+    document.execCommand('copy');
+    toast('📋 Endereço copiado');
+  }
+});
 $('#campClose').addEventListener('click', () => { $('#campBackdrop').hidden = true; refreshAll(); });
 $('#campBackdrop').addEventListener('click', (e) => {
   if (e.target === $('#campBackdrop')) { $('#campBackdrop').hidden = true; refreshAll(); }
 });
 $('#btnUsers').addEventListener('click', () => { renderTeam(); $('#teamBackdrop').hidden = false; });
+
+// ---- Painel 🧩 Etapas do funil (renomear / criar / excluir) ----
+async function chamaEtapas(body) {
+  try {
+    const r = await api('/api/etapas', { method: 'POST', body: JSON.stringify(body) });
+    aplicaEtapas(r.etapas);
+    renderEtapasPanel();
+    renderBoard();
+    await loadStats();
+    return true;
+  } catch (err) { toast('⚠️ ' + err.message); return false; }
+}
+function renderEtapasPanel() {
+  const box = $('#etapasBody');
+  box.innerHTML = '';
+  if (!ETAPAS_CFG) { box.append(el('div', 'team-empty', 'Carregando…')); return; }
+  const secoes = [
+    { funil: 'vendas', titulo: '🚁 Funil de vendas (drones)', lista: ETAPAS_CFG.vendas, nota: 'As etapas do meio (entre Qualificado e Ganho) podem ser excluídas; as demais são fixas.' },
+    { funil: 'servicos', titulo: '🔧 Painel de Serviços', lista: ETAPAS_CFG.servicos, nota: '' },
+    { funil: 'curso', titulo: '🎓 Painel do Curso', lista: ETAPAS_CFG.curso, nota: '' },
+  ];
+  for (const sec of secoes) {
+    box.append(el('div', 'section-title', sec.titulo));
+    if (sec.nota) box.append(el('p', 'muted-note', sec.nota));
+    for (const e of sec.lista) {
+      const row = el('div', 'team-row');
+      if (e.fixa) row.append(el('span', 'tlogin', '🔒'));
+      const inp = document.createElement('input');
+      // mostra o nome como aparece NA INTERFACE (padrão curado do quadro
+      // quando o gestor ainda não renomeou)
+      inp.value = e.renomeada ? e.label
+        : ((COL[e.key] || SCOL[e.key] || KCOL[e.key] || {}).label || e.label);
+      inp.maxLength = 40; inp.style.flex = '1';
+      inp.style.font = 'inherit'; inp.style.padding = '7px 9px';
+      inp.style.border = '1px solid var(--line)'; inp.style.borderRadius = '8px';
+      row.append(inp);
+      const lblIni = inp.value; // não renomear sem mudança real
+      const save = el('button', 'btn primary small', '💾');
+      save.type = 'button'; save.title = 'Salvar o novo nome';
+      save.onclick = async () => {
+        const v = inp.value.trim();
+        if (!v || v === lblIni) return;
+        if (await chamaEtapas({ funil: sec.funil, acao: 'renomear', key: e.key, label: v })) toast('✏️ Etapa renomeada');
+      };
+      row.append(save);
+      if (!e.fixa) {
+        const del = el('button', 'icon-btn', '🗑️');
+        del.type = 'button'; del.title = 'Excluir etapa (precisa estar vazia)';
+        del.onclick = async () => {
+          if (!confirm(`Excluir a etapa "${e.label}"? Só é possível quando não há leads nela.`)) return;
+          if (await chamaEtapas({ funil: sec.funil, acao: 'excluir', key: e.key })) toast('🗑️ Etapa excluída');
+        };
+        row.append(del);
+      }
+      box.append(row);
+    }
+    const addRow = el('div', 'team-row');
+    const addInp = document.createElement('input');
+    addInp.placeholder = 'Nome da nova etapa…'; addInp.maxLength = 40; addInp.style.flex = '1';
+    addInp.style.font = 'inherit'; addInp.style.padding = '7px 9px';
+    addInp.style.border = '1px dashed var(--line)'; addInp.style.borderRadius = '8px';
+    const addBtn = el('button', 'btn primary small', '➕ Adicionar etapa');
+    addBtn.type = 'button';
+    addBtn.onclick = async () => {
+      const v = addInp.value.trim();
+      if (!v) { toast('Escreva o nome da nova etapa'); return; }
+      if (await chamaEtapas({ funil: sec.funil, acao: 'criar', label: v })) toast('➕ Etapa criada');
+    };
+    addRow.append(addInp, addBtn);
+    box.append(addRow);
+  }
+}
+$('#btnEtapas').addEventListener('click', () => { renderEtapasPanel(); $('#etapasBackdrop').hidden = false; $('#manageMenu').hidden = true; });
+$('#etapasClose').addEventListener('click', () => { $('#etapasBackdrop').hidden = true; refreshAll(); });
+$('#etapasBackdrop').addEventListener('click', (e) => { if (e.target === $('#etapasBackdrop')) { $('#etapasBackdrop').hidden = true; refreshAll(); } });
 $('#btnLogout').addEventListener('click', async () => {
   try { await api('/api/logout', { method: 'POST' }); } catch (_) {}
   await limpaCacheApi(); // não deixar dados deste usuário no cache p/ o próximo login
@@ -3686,6 +3920,7 @@ function applyRoleUI() {
   $('#btnReport').hidden = !gestor;
   $('#btnCampaigns').hidden = !gestor;
   $('#btnAlertas').hidden = !gestor;
+  $('#btnEtapas').hidden = !gestor;
   $('#btnUsers').hidden = me.papel !== 'admin';
   // botão "Recuperação" só para quem tem acesso liberado (admin/gerente sempre)
   $('#escRecup').hidden = !me.pode_recuperacao;

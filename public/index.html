@@ -60,6 +60,7 @@
           <button class="btn ghost" id="btnReport" title="Relatório diário" hidden>📊 Relatório</button>
           <button class="btn ghost" id="btnCampaigns" title="Campanhas" hidden>📣 Campanhas</button>
           <button class="btn ghost" id="btnAlertas" title="Prazos dos alertas de retorno e resposta" hidden>⏰ Alertas</button>
+          <button class="btn ghost" id="btnEtapas" title="Renomear, criar e excluir etapas dos funis" hidden>🧩 Etapas do funil</button>
           <button class="btn ghost" id="btnUsers" title="Usuários e acessos" hidden>👥 Usuários</button>
         </div>
       </div>
@@ -558,6 +559,42 @@
         </div>
         <div class="cw-teste" id="loteStatus" hidden></div>
 
+        <div class="section-title" style="margin-top:18px">🎓 Chatwoot do CURSO (instância separada)</div>
+        <p class="muted-note">Se a venda do curso atende num Chatwoot próprio, configure aqui.
+          Os leads desse Chatwoot chegam ao CRM <b>já classificados como 🎓 Curso</b> e dentro do
+          painel do Curso — e o chat/botões de cada lead usam a instância certa sozinhos.</p>
+        <div class="settings-row">
+          <label class="inline">Endereço do Chatwoot do curso
+            <input id="cwCursoUrl" placeholder="Ex.: https://curso.novaeradrones.com.br" />
+          </label>
+          <label class="inline">Nº da conta
+            <input id="cwCursoAccount" placeholder="Ex.: 1" style="width:70px" />
+          </label>
+          <label class="inline">Nº da caixa de entrada
+            <input id="cwCursoInbox" placeholder="Ex.: 1" style="width:70px" />
+          </label>
+        </div>
+        <div class="settings-row">
+          <label class="inline">Token de acesso da API <small class="req-hint">(do Chatwoot do curso)</small>
+            <input id="cwCursoToken" type="password" placeholder="cole o token aqui" autocomplete="off" />
+          </label>
+        </div>
+        <div class="settings-row">
+          <label class="inline" style="flex:1">Saudação automática (curso)
+            <textarea id="cwCursoSaudacao" rows="2" placeholder="Ex.: Olá {nome}! Que bom seu interesse no curso 🎓"></textarea>
+          </label>
+          <button class="btn primary small" id="btnSaveCwCurso" type="button">Salvar Chatwoot do curso</button>
+          <button class="btn ghost small" id="btnTestCwCurso" type="button" title="Verifica endereço, token e conta do Chatwoot do curso">🔌 Testar conexão</button>
+        </div>
+        <div class="cw-teste" id="cwCursoTesteBox" hidden></div>
+        <p class="muted-note" style="margin-top:8px">Ponte do curso: no <b>Chatwoot do curso</b>, vá em
+          ⚙️ Configurações → Integrações → Webhooks, cole o endereço abaixo e marque
+          <b>Conversa criada</b>, <b>Conversa atualizada</b> e <b>Mensagem criada</b>.</p>
+        <div class="settings-row">
+          <input id="whCursoUrl" readonly placeholder="carregando…" style="flex:1; min-width: 0" />
+          <button class="btn primary small" id="btnCopiarWhCurso" type="button">📋 Copiar endereço</button>
+        </div>
+
         <div class="section-title" style="margin-top:18px">📥 Receber leads do Chatwoot automaticamente</div>
         <p class="muted-note">Todo cliente que chamar no Chatwoot vira lead aqui <b>sozinho</b> — já conectado à
           conversa (chat, saudação, tudo funcionando) e entrando no rodízio dos SDRs. Para ligar essa ponte:
@@ -621,6 +658,22 @@
         <div style="margin-top:16px">
           <button class="btn primary" id="btnSaveAlertas" type="button">Salvar</button>
         </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal de Etapas do funil (renomear / criar / excluir) — gestor -->
+  <div class="modal-backdrop" id="etapasBackdrop" hidden>
+    <div class="modal" role="dialog" aria-modal="true">
+      <div class="modal-head">
+        <h2>🧩 Etapas do funil</h2>
+        <button class="icon-btn" id="etapasClose" aria-label="Fechar">✕</button>
+      </div>
+      <div class="modal-body">
+        <p class="muted-note">Renomeie qualquer coluna (o nome muda para todo mundo, na hora).
+          Etapas com 🔒 são fixas do sistema — dá para renomear, mas não excluir. Para excluir uma
+          etapa, ela precisa estar <b>vazia</b> (mova os leads antes).</p>
+        <div id="etapasBody"><!-- via JS --></div>
       </div>
     </div>
   </div>

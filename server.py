@@ -66,18 +66,116 @@ STAGES = ["novo", "triagem", "qualificado", "decidindo", "negociacao", "proposta
 # Etapas do funil de vendas (ja qualificado). "decidindo" = cliente avaliando se
 # vai adquirir o drone (antes de negociar); "financiamento" = proposta aceita,
 # cliente aguardando a liberacao do recurso no banco.
-SALES_STAGES = ("qualificado", "decidindo", "negociacao", "proposta",
-                "financiamento", "ganho")
+SALES_STAGES = ["qualificado", "decidindo", "negociacao", "proposta",
+                "financiamento", "ganho"]
 
 # Painel de SERVIÇOS (pós-venda): depois de vender o drone (ganho), o cliente
 # entra num funil separado de venda de serviços/pecas/manutencao.
-SERVICO_STAGES = ("recebido_serv", "ofertado", "negociando_serv",
-                  "proposta_serv", "vendido_serv", "recusado_serv")
+SERVICO_STAGES = ["recebido_serv", "ofertado", "negociando_serv",
+                  "proposta_serv", "vendido_serv", "recusado_serv"]
 
 # Painel do CURSO (venda do curso de pilotagem): funil paralelo proprio, como
 # Servicos. Entrada SO MANUAL — ninguem entra sozinho; o time marca na ficha.
-CURSO_STAGES = ("interessado_curso", "ofertado_curso", "negociando_curso",
-                "proposta_curso", "matriculado", "recusado_curso")
+CURSO_STAGES = ["interessado_curso", "ofertado_curso", "negociando_curso",
+                "proposta_curso", "matriculado", "recusado_curso"]
+
+# ---------------------------------------------------------------------------
+# Etapas EDITAVEIS: o gestor renomeia qualquer coluna e cria/exclui etapas.
+# As listas acima sao MUTADAS no lugar por recalcula_etapas() — todos os
+# pontos do codigo que as referenciam enxergam a versao atual. Fixas: inicio
+# (novo/triagem/qualificado) e fim (ganho/desistiu/perdido/curioso) de vendas.
+# ---------------------------------------------------------------------------
+STAGES_INICIO = ["novo", "triagem", "qualificado"]
+STAGES_FIM = ["ganho", "desistiu", "perdido", "curioso"]
+VENDAS_MEIO_PADRAO = ["decidindo", "negociacao", "proposta", "financiamento"]
+SERVICO_PADRAO = list(SERVICO_STAGES)
+CURSO_PADRAO = list(CURSO_STAGES)
+MAX_ETAPAS_CUSTOM = 8
+
+SERVICO_LABEL_PADRAO = {
+    "recebido_serv": "🔧 Cliente com drone", "ofertado": "📞 Ofereci o serviço",
+    "negociando_serv": "💬 Negociando", "proposta_serv": "📄 Proposta enviada",
+    "vendido_serv": "🏆 Serviço vendido", "recusado_serv": "❌ Não quis",
+}
+CURSO_LABEL_PADRAO = {
+    "interessado_curso": "🎓 Interessado", "ofertado_curso": "📞 Ofereci o curso",
+    "negociando_curso": "💬 Negociando", "proposta_curso": "📄 Proposta enviada",
+    "matriculado": "🏆 Matriculado", "recusado_curso": "❌ Não quis",
+}
+
+
+def _etapas_cfg():
+    st = _db.get("settings", {}) or {}
+    custom = st.get("etapas_custom") or {}
+    rem = set(st.get("etapas_removidas") or [])
+    return custom, rem
+
+
+def _lista_funil(padrao, chave_custom):
+    custom, rem = _etapas_cfg()
+    lista = [s for s in padrao if s not in rem]
+    lista += [e["key"] for e in (custom.get(chave_custom) or [])
+              if isinstance(e, dict) and e.get("key")]
+    return lista
+
+
+def vendas_meio():
+    """Etapas do MEIO do funil de vendas (entre qualificado e ganho) — as
+    unicas de vendas que podem ser excluidas."""
+    return _lista_funil(VENDAS_MEIO_PADRAO, "vendas")
+
+
+def recalcula_etapas():
+    """Reconstroi as listas de etapas a partir da configuracao salva."""
+    meio = vendas_meio()
+    STAGES[:] = STAGES_INICIO + meio + STAGES_FIM
+    SALES_STAGES[:] = ["qualificado"] + meio + ["ganho"]
+    ETAPAS_DE_VENDA[:] = meio + ["ganho"]
+    SERVICO_STAGES[:] = _lista_funil(SERVICO_PADRAO, "servicos") or [SERVICO_PADRAO[0]]
+    CURSO_STAGES[:] = _lista_funil(CURSO_PADRAO, "curso") or [CURSO_PADRAO[0]]
+
+
+def rotulo_etapa(key):
+    """Nome de exibicao da etapa: apelido do gestor > padrao > a propria chave."""
+    if not key:
+        return "—"
+    st = _db.get("settings", {}) or {}
+    r = (st.get("rotulos") or {}).get(key)
+    if r:
+        return r
+    if key in STATUS_LABEL:
+        return STATUS_LABEL[key]
+    if key in SERVICO_LABEL_PADRAO:
+        return SERVICO_LABEL_PADRAO[key]
+    if key in CURSO_LABEL_PADRAO:
+        return CURSO_LABEL_PADRAO[key]
+    custom, _ = _etapas_cfg()
+    for lista in custom.values():
+        for e in (lista or []):
+            if isinstance(e, dict) and e.get("key") == key:
+                return e.get("label") or key
+    return key
+
+
+def etapas_publico():
+    """Listas resolvidas (chave + nome + se e fixa) para o painel e o quadro.
+
+    "renomeada" = o GESTOR personalizou o nome (ou a etapa foi criada por ele).
+    O quadro so troca o rotulo quando renomeada — os nomes padrao da interface
+    (com emojis e dicas) nao podem ser sobrescritos pelos textos internos."""
+    meio = set(vendas_meio())
+    st = _db.get("settings", {}) or {}
+    rot = st.get("rotulos") or {}
+    custom_keys = {e.get("key") for lista in (st.get("etapas_custom") or {}).values()
+                   for e in (lista or []) if isinstance(e, dict)}
+
+    def linhas(keys, todas_removiveis):
+        return [{"key": k, "label": rotulo_etapa(k),
+                 "renomeada": k in rot or k in custom_keys,
+                 "fixa": (not todas_removiveis) and k not in meio} for k in keys]
+    return {"vendas": linhas(STAGES, False),
+            "servicos": linhas(SERVICO_STAGES, True),
+            "curso": linhas(CURSO_STAGES, True)}
 
 # Papeis da equipe (raias dos funis)
 PAPEIS = ("sdr", "vendedor")
@@ -397,6 +495,10 @@ def load_db():
                 l.setdefault("cliente_respondeu", None)
                 if not isinstance(l.get("chatwoot_msgs_vistas"), list):
                     l["chatwoot_msgs_vistas"] = []
+                # marcadores antigos eram ints (uma instancia so): viram o
+                # formato novo por instancia ("123" = drones)
+                l["chatwoot_msgs_vistas"] = [str(x) for x in l["chatwoot_msgs_vistas"]]
+                l.setdefault("chatwoot_origem", "")
             _db = data
     except Exception as e:
         # Arquivo ilegivel (queda de energia, edicao manual): NUNCA sobrescrever.
@@ -481,6 +583,8 @@ def make_lead(partial=None):
                                       # ainda espera a equipe responder (aviso verde)
         "chatwoot_msgs_vistas": [],   # ids de mensagem ja processados do webhook
                                       # (reentregas nao registram de novo)
+        "chatwoot_origem": "",        # em qual Chatwoot vive a conversa:
+                                      # "" = venda de drones | "curso"
         "created_at": now_iso(),  # data/hora de ENTRADA do lead
         "updated_at": now_iso(),
     }
@@ -650,7 +754,7 @@ def descreve_mudancas(antes, depois, campos):
         if a == d:
             continue
         if k == "status":
-            itens.append("➡️ Etapa: %s → %s" % (STATUS_LABEL.get(a, a or "—"), STATUS_LABEL.get(d, d)))
+            itens.append("➡️ Etapa: %s → %s" % (rotulo_etapa(a), rotulo_etapa(d)))
         elif k == "tipo":
             itens.append("✅ Classificado como %s" % (d or "—"))
         elif k == "valor":
@@ -662,13 +766,13 @@ def descreve_mudancas(antes, depois, campos):
         elif k == "itens":
             itens.append("📦 Pedido (drones) atualizado")
         elif k == "status_servico":
-            itens.append("🔧 Serviços — etapa: %s" % (d or "—"))
+            itens.append("🔧 Serviços — etapa: %s" % rotulo_etapa(d))
         elif k == "valor_servico":
             itens.append("🔧 Serviços — valor: R$ %s" % ("{:,.0f}".format(float(d or 0)).replace(",", ".")))
         elif k == "em_curso":
             itens.append("🎓 " + ("Entrou no painel do Curso" if d else "Saiu do painel do Curso"))
         elif k == "status_curso":
-            itens.append("🎓 Curso — etapa: %s" % (d or "—"))
+            itens.append("🎓 Curso — etapa: %s" % rotulo_etapa(d))
         elif k == "valor_curso":
             itens.append("🎓 Curso — valor: R$ %s" % ("{:,.0f}".format(float(d or 0)).replace(",", ".")))
         elif k == "formas_pagamento":
@@ -822,7 +926,7 @@ def apply_updates(lead, updates):
     if updates.get("status") in STAGES_EXIGEM_CONTATO and (
             not str(lead.get("telefone") or "").strip() or not str(lead.get("email") or "").strip()):
         # lista gerada das proprias etapas: nao desatualiza ao criar uma nova
-        etapas = "/".join('"%s"' % STATUS_LABEL.get(s, s) for s in STAGES_EXIGEM_CONTATO)
+        etapas = "/".join('"%s"' % rotulo_etapa(s) for s in STAGES_EXIGEM_CONTATO)
         raise ValueError("Para mover para %s, preencha telefone e e-mail do lead (nota fiscal)" % etapas)
 
     # Ao definir um vendedor, a posse do lead passa para ele (a menos que o
@@ -1172,14 +1276,17 @@ def user_publico(u):
             "senha_padrao": bool(u.get("senha_padrao")),
             "acesso_recuperacao": bool(u.get("acesso_recuperacao")),
             "pode_recuperacao": pode_recuperacao(u),
-            "recebe_leads": u.get("recebe_leads", True)}
+            "recebe_leads": u.get("recebe_leads", True),
+            "pode_mover": u.get("pode_mover", True)}
 
 
 def settings_publico():
     """Config exposta ao painel — sem os segredos (tokens do webhook e do Chatwoot)."""
     st = _db.get("settings", {})
-    pub = {k: v for k, v in st.items() if k not in ("webhook_token", "chatwoot_token")}
+    pub = {k: v for k, v in st.items()
+           if k not in ("webhook_token", "chatwoot_token", "curso_chatwoot_token")}
     pub["chatwoot_token_definido"] = bool(st.get("chatwoot_token"))
+    pub["curso_chatwoot_token_definido"] = bool(st.get("curso_chatwoot_token"))
     return pub
 
 
@@ -1196,12 +1303,24 @@ def chatwoot_base_url(valor):
     return m.group(1) if m else ""
 
 
-def chatwoot_cfg():
+def chatwoot_cfg(origem=""):
+    """Config do Chatwoot. origem="" = instancia da VENDA DE DRONES (padrao);
+    origem="curso" = instancia separada do CURSO (cada lead conversa na sua)."""
     st = _db.get("settings", {})
-    return (chatwoot_base_url(st.get("chatwoot_url")),
-            str(st.get("chatwoot_account_id") or "").strip(),
-            str(st.get("chatwoot_token") or ""),
-            str(st.get("chatwoot_saudacao") or ""))
+    p = "curso_chatwoot_" if origem == "curso" else "chatwoot_"
+    return (chatwoot_base_url(st.get(p + "url")),
+            str(st.get(p + "account_id") or "").strip(),
+            str(st.get(p + "token") or ""),
+            str(st.get(p + "saudacao") or ""))
+
+
+def origem_do_lead(lead):
+    """Em qual Chatwoot vive a conversa deste lead ("" = drones, "curso")."""
+    return "curso" if (lead or {}).get("chatwoot_origem") == "curso" else ""
+
+
+def inbox_cfg_key(origem):
+    return "curso_chatwoot_inbox_id" if origem == "curso" else "chatwoot_inbox_id"
 
 
 def conv_id_valido(conv):
@@ -1524,7 +1643,7 @@ def em_fase_sdr(lead):
 
 # Etapas que sao TRABALHO DE VENDEDOR — um SDR nao pode mover um lead para ca
 # (o SDR vai ate a qualificacao; dali em diante e venda).
-ETAPAS_DE_VENDA = ("decidindo", "negociacao", "proposta", "financiamento", "ganho")
+ETAPAS_DE_VENDA = ["decidindo", "negociacao", "proposta", "financiamento", "ganho"]
 
 
 def pode_ver_lead(user, lead):
@@ -1786,20 +1905,28 @@ def _resumo_msg(payload):
     return '"%s"' % texto if texto else ""
 
 
-def _registra_msg_cliente(lead, payload):
+def _marca_msg(origem, msg_id):
+    """Marcador de dedup POR INSTANCIA: ids de mensagem sao sequenciais por
+    instalacao do Chatwoot — o id 500 dos drones e o 500 do curso sao mensagens
+    diferentes e nao podem se anular."""
+    return ("curso:%d" % msg_id) if origem == "curso" else str(msg_id)
+
+
+def _registra_msg_cliente(lead, payload, origem=""):
     """Mensagem RECEBIDA do cliente: grava o que ele disse no historico, baixa
     o alerta "registre a resposta" (ja esta registrada) e acende o aviso verde
     "cliente respondeu — responda!". Chamar SEGURANDO o _lock."""
-    # dedup por CONJUNTO de ids ja vistos (nao por "maior id"): webhooks chegam
-    # fora de ordem e uma mensagem atrasada legitima nao pode ser descartada
+    # dedup por CONJUNTO de marcadores ja vistos (nao por "maior id"): webhooks
+    # chegam fora de ordem e mensagem atrasada legitima nao pode ser descartada
     msg_id = _msg_id_int(payload)
+    marca = _marca_msg(origem, msg_id) if msg_id else ""
     vistos = lead.get("chatwoot_msgs_vistas")
     if not isinstance(vistos, list):
         vistos = []
-    if msg_id and msg_id in vistos:
+    if marca and marca in vistos:
         return False  # reentrega da mesma mensagem (o Chatwoot repete envios)
-    if msg_id:
-        vistos.append(msg_id)
+    if marca:
+        vistos.append(marca)
         lead["chatwoot_msgs_vistas"] = vistos[-80:]
     # Cliente dado como perdido/desistiu/curioso que volta a escrever NA MESMA
     # conversa REABRE na triagem (mesma regra da conversa nova) — a equipe
@@ -1856,7 +1983,7 @@ def _dt_msg(payload):
         return None
 
 
-def _msg_atendente(payload):
+def _msg_atendente(payload, origem=""):
     """Mensagem ENVIADA pelo atendente (respondida direto no painel do Chatwoot,
     ou o eco da que o CRM acabou de mandar): apaga o aviso "cliente respondeu"
     e reinicia o relogio da resposta pendente. NUNCA cria nem mescla lead —
@@ -1875,17 +2002,19 @@ def _msg_atendente(payload):
         return {"ok": True, "ignored": "sem numero de conversa"}
     with _lock:
         lead = next((l for l in _db["leads"]
-                     if l.get("chatwoot_conversation_id") in cands), None)
+                     if l.get("chatwoot_conversation_id") in cands
+                     and origem_do_lead(l) == origem), None)
         if not lead:
             return {"ok": True, "ignored": "conversa sem lead"}
         msg_id = _msg_id_int(payload)
+        marca = _marca_msg(origem, msg_id) if msg_id else ""
         vistos = lead.get("chatwoot_msgs_vistas")
         if not isinstance(vistos, list):
             vistos = []
-        if msg_id and msg_id in vistos:
+        if marca and marca in vistos:
             return {"ok": True, "ignored": "mensagem ja processada"}
-        if msg_id:
-            vistos.append(msg_id)
+        if marca:
+            vistos.append(marca)
             lead["chatwoot_msgs_vistas"] = vistos[-80:]
         # Eco/entrega atrasada: se a resposta do cliente e MAIS NOVA que esta
         # mensagem do atendente, a ultima palavra e do cliente — o aviso verde
@@ -1909,7 +2038,10 @@ def _msg_atendente(payload):
     return {"ok": True, "atendente": True, "id": lead["id"]}
 
 
-def handle_chatwoot_event(payload):
+def handle_chatwoot_event(payload, origem=""):
+    """origem = "" (Chatwoot da venda de drones) | "curso" (Chatwoot do curso).
+    Numeros de conversa das duas instancias podem COINCIDIR — todo casamento
+    por conversa filtra tambem pela origem."""
     event = payload.get("event") if isinstance(payload, dict) else None
     if not event:
         return {"ok": False, "reason": "sem evento"}
@@ -1925,7 +2057,7 @@ def handle_chatwoot_event(payload):
             return {"ok": True, "ignored": "edicao de mensagem"}
         # mensagem do atendente/nota privada: so baixa os avisos do lead
         if not _is_incoming(payload):
-            return _msg_atendente(payload)
+            return _msg_atendente(payload, origem)
         conversation = payload.get("conversation") or {}
         # preferimos o display_id (o numero que aparece nas URLs do Chatwoot);
         # o id global fica como candidato para casar leads antigos
@@ -2044,30 +2176,49 @@ def handle_chatwoot_event(payload):
         lead = None
         if conv_cands:
             lead = next((l for l in _db["leads"]
-                         if l.get("chatwoot_conversation_id") in conv_cands), None)
+                         if l.get("chatwoot_conversation_id") in conv_cands
+                         and origem_do_lead(l) == origem), None)
 
         # Cliente conhecido abrindo conversa NOVA: reconhece pelo id do contato,
         # telefone ou e-mail e atualiza o lead existente em vez de duplicar
         # (adota a conversa nova para as proximas mensagens chegarem certo).
         if lead is None and (contact_id is not None or telefone or email):
             email_n = str(email or "").strip().lower()
+            # id de CONTATO so casa dentro da MESMA instancia (o contato nº 41
+            # dos drones e o nº 41 do curso podem ser pessoas diferentes);
+            # telefone/e-mail identificam a pessoa em qualquer instancia
             candidatos = [l for l in _db["leads"] if (
-                (contact_id is not None and l.get("chatwoot_contact_id") == contact_id)
+                (contact_id is not None and l.get("chatwoot_contact_id") == contact_id
+                 and origem_do_lead(l) == origem)
                 or (telefone and same_phone(l.get("telefone"), telefone))
                 or (email_n and str(l.get("email") or "").strip().lower() == email_n))]
             if candidatos:
                 # prefere um lead em atendimento; so cai num encerrado se nao houver
                 ativos = [l for l in candidatos if l.get("status") not in ("ganho", "perdido", "desistiu", "curioso")]
                 lead = (ativos or candidatos)[0]
-                if conversation_id is not None:
+                # So ADOTA (troca conversa/origem) quando e uma conversa NOVA de
+                # verdade (evento de conversa) ou quando o lead ainda nao tem
+                # conversa. Mensagem avulsa da OUTRA instancia nao rouba o
+                # vinculo — senao um cliente ativo nas duas instancias faria o
+                # lead "quicar" de origem a cada mensagem, com spam no historico.
+                trocou = (conversation_id is not None
+                          and lead.get("chatwoot_conversation_id") != conversation_id
+                          and (event in CONVERSATION_EVENTS
+                               or not conv_id_valido(lead.get("chatwoot_conversation_id"))))
+                if trocou:
                     lead["chatwoot_conversation_id"] = conversation_id
+                    # a conversa adotada vive NESTA instancia: troca a origem e o
+                    # contato junto (o contato antigo era da outra instancia)
+                    lead["chatwoot_origem"] = origem
+                    if contact_id is not None:
+                        lead["chatwoot_contact_id"] = contact_id
                 # cliente que estava dado como perdido/desistiu/curioso voltou:
                 # reentra na triagem para a equipe enxergar
                 if lead.get("status") in ("perdido", "desistiu", "curioso"):
                     lead["status"] = "novo"
                     lead["tipo"] = ""  # volta para a triagem do SDR
                     registra_hist(lead, "Chatwoot", ["🔄 Cliente voltou pelo Chatwoot — reaberto na triagem"])
-                else:
+                elif trocou:
                     registra_hist(lead, "Chatwoot", ["💬 Nova conversa no Chatwoot"])
                 print("[webhook] conversa nova %s reconhecida -> lead %s" % (
                     conversation_id, lead.get("nome") or lead["id"]))
@@ -2076,6 +2227,13 @@ def handle_chatwoot_event(payload):
             if conversation_id is None and not telefone and not email:
                 return {"ok": False, "reason": "evento sem dados de contato"}
             lead = make_lead(incoming)
+            lead["chatwoot_origem"] = origem
+            if origem == "curso":
+                # cliente do Chatwoot do CURSO ja chega classificado e no painel
+                lead["tipo"] = "curso"
+                lead["em_curso"] = True
+                lead["status_curso"] = CURSO_STAGES[0]
+                lead["qualificado_em"] = lead.get("qualificado_em") or now_iso()
             # Rodizio: o lead novo ja cai para um SDR fazer o primeiro contato.
             sdr = next_sdr()
             if sdr:
@@ -2088,7 +2246,7 @@ def handle_chatwoot_event(payload):
             _db["leads"].append(lead)
             # primeira mensagem do cliente ja entra registrada no historico
             if event == "message_created":
-                _registra_msg_cliente(lead, payload)
+                _registra_msg_cliente(lead, payload, origem)
             save_db()
             print("[webhook] novo lead: %s -> SDR %s (canal: %s)" % (
                 nome or telefone or conversation_id, sdr or "-", canal or "-"))
@@ -2124,7 +2282,7 @@ def handle_chatwoot_event(payload):
             lead["produto"] = resumo_produtos(lead["itens"])
         # o que o cliente respondeu entra sozinho no historico + aviso "responda!"
         if event == "message_created":
-            _registra_msg_cliente(lead, payload)
+            _registra_msg_cliente(lead, payload, origem)
         lead["updated_at"] = now_iso()
         save_db()
         print("[webhook] lead atualizado: %s" % (lead.get("nome") or lead.get("telefone") or lead["id"]))
@@ -2231,6 +2389,8 @@ class Handler(BaseHTTPRequestHandler):
         token = (qs.get("token") or [None])[0] or self.headers.get("X-Webhook-Token")
         if token != WEBHOOK_TOKEN:
             return self.send_json(401, {"error": "Token invalido"})
+        # origem=curso -> eventos do Chatwoot do CURSO (instancia separada)
+        origem = "curso" if (qs.get("origem") or [""])[0] == "curso" else ""
         # marca que o Chatwoot está entregando eventos (indicador no painel)
         global _webhook_ultimo
         _webhook_ultimo = now_iso()
@@ -2239,7 +2399,7 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:
             return self.send_json(400, {"error": "Corpo invalido"})
         try:
-            result = handle_chatwoot_event(payload)
+            result = handle_chatwoot_event(payload, origem)
         except Exception as e:
             print("Erro no webhook:", e)
             result = {"ok": False, "reason": "erro interno"}
@@ -2466,6 +2626,8 @@ class Handler(BaseHTTPRequestHandler):
                             alvo["acesso_recuperacao"] = bool(body["acesso_recuperacao"])
                         if "recebe_leads" in body:
                             alvo["recebe_leads"] = bool(body["recebe_leads"])
+                        if "pode_mover" in body:
+                            alvo["pode_mover"] = bool(body["pode_mover"])
                         if body.get("senha"):
                             if len(str(body["senha"])) < 6:
                                 return self.send_json(400, {"error": "Senha muito curta (mínimo 6 caracteres)"})
@@ -2543,10 +2705,13 @@ class Handler(BaseHTTPRequestHandler):
                     "recuperacao_total": n_recuperacao,
                     "servicos_total": n_servicos,
                     "curso_total": n_curso,
+                    "etapas": etapas_publico(),
                     "cadencia_dias": _cad,
                     "resposta_horas": resposta_horas_cfg(),
                     "chatwoot_url": str(_db.get("settings", {}).get("chatwoot_url") or ""),
                     "chatwoot_account_id": str(_db.get("settings", {}).get("chatwoot_account_id") or ""),
+                    "curso_chatwoot_url": str(_db.get("settings", {}).get("curso_chatwoot_url") or ""),
+                    "curso_chatwoot_account_id": str(_db.get("settings", {}).get("curso_chatwoot_account_id") or ""),
                     "cidades": cidades,
                     "mesorregioes": MESORREGIOES,
                     "por_status": por_status,
@@ -2667,8 +2832,78 @@ class Handler(BaseHTTPRequestHandler):
                     st["chatwoot_token"] = str(body["chatwoot_token"] or "").strip()
                 if "chatwoot_saudacao" in body:
                     st["chatwoot_saudacao"] = str(body["chatwoot_saudacao"] or "").strip()[:2000]
+                # Chatwoot separado do CURSO (mesmos campos, prefixo proprio)
+                if "curso_chatwoot_url" in body:
+                    st["curso_chatwoot_url"] = chatwoot_base_url(body["curso_chatwoot_url"])
+                if "curso_chatwoot_account_id" in body:
+                    st["curso_chatwoot_account_id"] = re.sub(r"[^0-9]", "", str(body["curso_chatwoot_account_id"]))
+                if "curso_chatwoot_inbox_id" in body:
+                    st["curso_chatwoot_inbox_id"] = re.sub(r"[^0-9]", "", str(body["curso_chatwoot_inbox_id"]))
+                if "curso_chatwoot_token" in body:
+                    st["curso_chatwoot_token"] = str(body["curso_chatwoot_token"] or "").strip()
+                if "curso_chatwoot_saudacao" in body:
+                    st["curso_chatwoot_saudacao"] = str(body["curso_chatwoot_saudacao"] or "").strip()[:2000]
                 save_db()
                 return self.send_json(200, {"settings": settings_publico()})
+
+        # ---- Etapas do funil: renomear qualquer coluna, criar/excluir (gestor) ----
+        if path == "/api/etapas" and method == "POST":
+            if not gestor:
+                return self.send_json(403, {"error": "Só gerente/administrador edita as etapas"})
+            try:
+                body = self.read_body()
+            except Exception:
+                return self.send_json(400, {"error": "Corpo invalido"})
+            funil = str(body.get("funil") or "")
+            acao = str(body.get("acao") or "")
+            key = str(body.get("key") or "").strip()
+            label = str(body.get("label") or "").strip()[:40]
+            if funil not in ("vendas", "servicos", "curso") or acao not in ("criar", "renomear", "excluir"):
+                return self.send_json(400, {"error": "Pedido inválido"})
+            campo_lead = {"vendas": "status", "servicos": "status_servico", "curso": "status_curso"}[funil]
+            lista_atual = {"vendas": STAGES, "servicos": SERVICO_STAGES, "curso": CURSO_STAGES}[funil]
+            with _lock:
+                st = _db.setdefault("settings", {})
+                custom = st.setdefault("etapas_custom", {})
+                minhas = custom.setdefault(funil, [])
+                rem = st.setdefault("etapas_removidas", [])
+                rot = st.setdefault("rotulos", {})
+                if acao == "criar":
+                    if not label:
+                        return self.send_json(400, {"error": "Dê um nome para a nova etapa"})
+                    if len(minhas) >= MAX_ETAPAS_CUSTOM:
+                        return self.send_json(400, {"error": "Limite de %d etapas criadas neste funil" % MAX_ETAPAS_CUSTOM})
+                    minhas.append({"key": "x" + secrets.token_hex(4), "label": label})
+                elif acao == "renomear":
+                    if not label:
+                        return self.send_json(400, {"error": "Dê um nome para a etapa"})
+                    if key not in lista_atual:
+                        return self.send_json(400, {"error": "Etapa não encontrada"})
+                    proprio = next((e for e in minhas if e.get("key") == key), None)
+                    if proprio:
+                        proprio["label"] = label
+                    else:
+                        rot[key] = label
+                else:  # excluir
+                    if key not in lista_atual:
+                        return self.send_json(400, {"error": "Etapa não encontrada"})
+                    removiveis = set(vendas_meio()) if funil == "vendas" else set(lista_atual)
+                    if key not in removiveis:
+                        return self.send_json(400, {"error": "Esta etapa é fixa do sistema — dá para renomear, mas não excluir"})
+                    if funil != "vendas" and len(lista_atual) <= 1:
+                        return self.send_json(400, {"error": "O funil precisa de ao menos uma etapa"})
+                    n_leads = sum(1 for l in _db["leads"] if l.get(campo_lead) == key)
+                    if n_leads:
+                        return self.send_json(400, {"error":
+                            "Há %d lead(s) nessa etapa — mova todos para outra coluna antes de excluir" % n_leads})
+                    if any(e.get("key") == key for e in minhas):
+                        custom[funil] = [e for e in minhas if e.get("key") != key]
+                    else:
+                        rem.append(key)
+                    rot.pop(key, None)
+                save_db()
+                recalcula_etapas()
+                return self.send_json(200, {"ok": True, "etapas": etapas_publico()})
 
         # Testa a conexao com o Chatwoot e devolve um veredito em portugues claro
         # (token errado? conta errada? servidor fora?). So gestor. NUNCA inclui o
@@ -2685,7 +2920,8 @@ class Handler(BaseHTTPRequestHandler):
             with _lock:
                 cw = [l for l in _db["leads"] if l.get("source") == "chatwoot"]
                 ultimo_lead = max((str(l.get("created_at") or "") for l in cw), default="") or None
-            return self.send_json(200, {"url": url, "total_chatwoot": len(cw),
+            return self.send_json(200, {"url": url, "url_curso": url + "&origem=curso",
+                                        "total_chatwoot": len(cw),
                                         "ultimo_lead": ultimo_lead,
                                         "ultimo_evento": _webhook_ultimo})
 
@@ -2713,7 +2949,12 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/chatwoot/teste" and method == "POST":
             if not gestor:
                 return self.send_json(403, {"error": "Teste disponível só para gerente/administrador"})
-            base, acc, token, saud = chatwoot_cfg()
+            try:
+                corpo_teste = self.read_body()
+            except Exception:
+                corpo_teste = {}
+            origem_teste = "curso" if corpo_teste.get("origem") == "curso" else ""
+            base, acc, token, saud = chatwoot_cfg(origem_teste)
             faltas = [n for n, v in (("o endereço", base), ("o nº da conta", acc), ("o token", token)) if not v]
             if faltas:
                 return self.send_json(200, {"ok": False, "mensagem":
@@ -3283,17 +3524,18 @@ class Handler(BaseHTTPRequestHandler):
         mch = re.match(r"^/api/leads/([^/]+)/chatwoot$", path)
         if mch and method == "POST":
             lead_id = mch.group(1)
-            base, acc, token, saud = chatwoot_cfg()
-            configurado = bool(base and acc and token)
             with _lock:
                 lead = next((l for l in _db["leads"] if l["id"] == lead_id), None)
                 if not lead or not pode_ver_lead(user, lead):
                     return self.send_json(404, {"error": "Lead nao encontrado"})
+                origem = origem_do_lead(lead)
+                base, acc, token, saud = chatwoot_cfg(origem)
+                configurado = bool(base and acc and token)
                 conv = conv_id_valido(lead.get("chatwoot_conversation_id"))
                 conv_url = chatwoot_conversa_url(base, acc, conv)
                 nome = str(lead.get("nome") or "").strip()
                 telefone = lead.get("telefone") or ""
-                inbox = str(_db.get("settings", {}).get("chatwoot_inbox_id") or "").strip()
+                inbox = str(_db.get("settings", {}).get(inbox_cfg_key(origem)) or "").strip()
                 autor, papel = user["nome"], user["papel"]
                 ja_pendente = bool(lead.get("aguardando_resposta"))
                 ultimo = lead["historico"][-1] if lead.get("historico") else None
@@ -3399,13 +3641,13 @@ class Handler(BaseHTTPRequestHandler):
         # e devolve so os campos mapeados.
         mchat = re.match(r"^/api/leads/([^/]+)/chatwoot-chat$", path)
         if mchat and method == "GET":
-            base, acc, token, _s = chatwoot_cfg()
-            if not (base and acc and token):
-                return self.send_json(400, {"error": "Chatwoot não configurado"})
             with _lock:
                 lead = next((l for l in _db["leads"] if l["id"] == mchat.group(1)), None)
                 if not lead or not pode_ver_lead(user, lead):
                     return self.send_json(404, {"error": "Lead nao encontrado"})
+                base, acc, token, _s = chatwoot_cfg(origem_do_lead(lead))
+                if not (base and acc and token):
+                    return self.send_json(400, {"error": "Chatwoot não configurado"})
                 conv = conv_id_valido(lead.get("chatwoot_conversation_id"))
             if not conv:
                 return self.send_json(200, {"mensagens": [], "sem_conversa": True})
@@ -3472,18 +3714,19 @@ class Handler(BaseHTTPRequestHandler):
                     return self.send_json(400, {"error": "Arquivo muito grande — o limite é 10 MB"})
             if not texto and not anexo_bytes:
                 return self.send_json(400, {"error": "Escreva a mensagem antes de enviar"})
-            base, acc, token, _saud = chatwoot_cfg()
-            if not (base and acc and token):
-                return self.send_json(400, {"error": "Chatwoot não configurado — peça ao gestor "
-                                            "para configurar em Gerenciar → Campanhas"})
             with _lock:
                 lead = next((l for l in _db["leads"] if l["id"] == lead_id), None)
                 if not lead or not pode_ver_lead(user, lead):
                     return self.send_json(404, {"error": "Lead nao encontrado"})
+                origem = origem_do_lead(lead)
+                base, acc, token, _saud = chatwoot_cfg(origem)
+                if not (base and acc and token):
+                    return self.send_json(400, {"error": "Chatwoot não configurado — peça ao gestor "
+                                                "para configurar em Gerenciar → Campanhas"})
                 conv = conv_id_valido(lead.get("chatwoot_conversation_id"))
                 nome = str(lead.get("nome") or "").strip()
                 telefone = lead.get("telefone") or ""
-                inbox = str(_db.get("settings", {}).get("chatwoot_inbox_id") or "").strip()
+                inbox = str(_db.get("settings", {}).get(inbox_cfg_key(origem)) or "").strip()
                 autor, papel = user["nome"], user["papel"]
                 if lead_id in _cw_em_voo:
                     return self.send_json(409, {"error": "Já tem um envio em andamento para este lead — aguarde uns segundos"})
@@ -3589,6 +3832,18 @@ class Handler(BaseHTTPRequestHandler):
                 for k in ("em_servicos", "status_servico", "valor_servico",
                           "em_curso", "status_curso", "valor_curso"):
                     body.pop(k, None)
+            # "mover etapas" desligado vale tambem na criacao: nao cadastra lead
+            # ja em etapa avancada nem dentro dos paineis (senao o 403 do PATCH
+            # seria contornavel criando o lead direto na etapa desejada)
+            if user["papel"] in ("sdr", "vendedor") and not user.get("pode_mover", True):
+                if body.get("status") not in (None, "", "novo", "triagem"):
+                    return self.send_json(403, {"error": "Mover leads de etapa está bloqueado para você — cadastre o lead e peça a um colega para avançá-lo"})
+                if body.get("em_servicos") or body.get("status_servico") \
+                        or body.get("em_curso") or body.get("status_curso") \
+                        or body.get("tipo") == "curso":
+                    return self.send_json(403, {"error": "Mover leads de etapa está bloqueado para você — fale com o administrador"})
+                for k in ("em_servicos", "status_servico", "em_curso", "status_curso"):
+                    body.pop(k, None)
             with _lock:
                 lead = make_lead({"source": "manual"})
                 try:
@@ -3651,6 +3906,14 @@ class Handler(BaseHTTPRequestHandler):
                     if user["papel"] == "sdr" and any(
                             k in body for k in ("em_curso", "status_curso", "valor_curso")):
                         return self.send_json(403, {"error": "O painel do Curso é trabalho dos vendedores"})
+                    # permissao individual: quem esta com "mover etapas" desligado
+                    # so consulta e registra notas — nao muda etapa de NENHUM funil,
+                    # nem por caminhos indiretos (entrar/sair de painel move o lead
+                    # de coluna; mudar a classificacao muda o funil dele)
+                    if user["papel"] in ("sdr", "vendedor") and not user.get("pode_mover", True) \
+                            and any(k in body for k in ("status", "status_servico", "status_curso",
+                                                        "em_servicos", "em_curso", "tipo")):
+                        return self.send_json(403, {"error": "Mover leads de etapa está bloqueado para você — fale com o administrador"})
                     if user["papel"] == "vendedor" and "vendedor" in body and body["vendedor"] not in ("", user["nome"]):
                         return self.send_json(403, {"error": "Vendedor só pode assumir o lead para si"})
                     # aplica numa copia: se uma regra barrar no meio, o lead
@@ -3750,6 +4013,7 @@ def _laco_backup():
 
 def main():
     load_db()
+    recalcula_etapas()  # aplica as etapas personalizadas salvas nas configuracoes
     load_cidades()
     senha_admin = ensure_admin()
     ensure_webhook_token()
