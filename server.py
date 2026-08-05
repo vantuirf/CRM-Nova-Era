@@ -1666,6 +1666,8 @@ def _roda_conectar_lote(base, acc, token, inbox):
         with _lock:
             ids = [l["id"] for l in _db["leads"]
                    if l.get("recuperacao")
+                   # lote dos DRONES: lead do curso conversa na OUTRA instancia
+                   and l.get("tipo") != "curso" and origem_do_lead(l) != "curso"
                    and not conv_id_valido(l.get("chatwoot_conversation_id"))
                    and len(norm_phone(l.get("telefone"))) >= 8]
         st["total"] = len(ids)
@@ -2755,7 +2757,8 @@ class Handler(BaseHTTPRequestHandler):
                 # contagens dos lotes (para os botoes Atuais/Recuperacao/Servicos).
                 # Recuperacao so conta/aparece para quem tem acesso liberado.
                 pode_rec = pode_recuperacao(user)
-                n_recuperacao = sum(1 for l in todos_visiveis if l.get("recuperacao")) if pode_rec else 0
+                n_recuperacao = sum(1 for l in todos_visiveis
+                                    if l.get("recuperacao") and l.get("tipo") != "curso") if pode_rec else 0
                 n_servicos = sum(1 for l in todos_visiveis if l.get("em_servicos")) \
                     if user["papel"] != "sdr" else 0
                 n_curso = sum(1 for l in todos_visiveis if l.get("em_curso")
@@ -2772,7 +2775,9 @@ class Handler(BaseHTTPRequestHandler):
                                      or user["nome"] in (l.get("vendedor"), l.get("responsavel")))] \
                         if user["papel"] != "sdr" else []
                 elif escopo == "recuperacao":
-                    visiveis = [l for l in todos_visiveis if l.get("recuperacao")] if pode_rec else []
+                    # recuperacao do CURSO vive so no painel 🎓 — aqui e a dos drones
+                    visiveis = [l for l in todos_visiveis
+                                if l.get("recuperacao") and l.get("tipo") != "curso"] if pode_rec else []
                 else:
                     visiveis = [l for l in todos_visiveis if not l.get("recuperacao")]
                 por_status = {s: {"count": 0, "valor": 0} for s in STAGES}
@@ -3367,8 +3372,12 @@ class Handler(BaseHTTPRequestHandler):
                               or user["nome"] in (l.get("vendedor"), l.get("responsavel")))] \
                     if user["papel"] != "sdr" else []
             elif escopo == "recuperacao":
-                # só quem tem acesso liberado vê a Recuperação
-                leads = [l for l in leads if l.get("recuperacao")] if pode_recuperacao(user) else []
+                # só quem tem acesso liberado vê a Recuperação. Leads 🔄 do CURSO
+                # nao entram aqui — ficam SO no painel 🎓 (senao bagunca a
+                # recuperacao dos drones)
+                leads = [l for l in leads
+                         if l.get("recuperacao") and l.get("tipo") != "curso"] \
+                    if pode_recuperacao(user) else []
             else:
                 leads = [l for l in leads if not l.get("recuperacao")]
             if q:
