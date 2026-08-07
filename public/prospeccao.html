@@ -151,7 +151,7 @@
           </select>
         </div>
         <table>
-          <thead><tr><th>Fazenda</th><th>Município</th><th>Área (ha)</th><th>Perímetro (km)</th><th>Categoria</th></tr></thead>
+          <thead><tr><th>Fazenda / proprietário</th><th>Município</th><th>Área (ha)</th><th>Perímetro (km)</th><th>Categoria</th></tr></thead>
           <tbody id="tbFaz"></tbody>
         </table>
         <div class="paginacao">
@@ -433,7 +433,7 @@ async function carregarFazendas(){
   const r = await api("/atlas-api/fazendas?"+ps);
   document.getElementById("tbFaz").innerHTML = r.fazendas.map(f => `
     <tr class="linha" onclick="abrirFazenda(${f.id})">
-      <td>${esc(f.nome)}</td><td>${esc(f.municipio||"–")}</td>
+      <td>${esc(f.nome)}<br><small style="color:#7a8794">${esc(f.dono||"sem proprietário cadastrado")}</small></td><td>${esc(f.municipio||"–")}</td>
       <td>${fmt(Math.round(f.area_total_ha))}</td>
       <td>${f.perimetro_km ? f.perimetro_km.toFixed(2) : "–"}</td>
       <td><span class="tag ${f.categoria}">${f.categoria.replace("_"," ")}</span></td>
@@ -486,7 +486,8 @@ async function carregarAreas(){
       color: corDa(f.categoria), weight: 1.4, opacity: .95,
       fillColor: corDa(f.categoria), fillOpacity: .12
     }).bindPopup(
-      `<b>${esc(f.nome)}</b><br>${fmt(Math.round(f.area_total_ha))} ha` +
+      `<b>${esc(f.nome)}</b>` + (f.dono ? `<br>👤 ${esc(f.dono)}` : "") +
+      `<br>${fmt(Math.round(f.area_total_ha))} ha` +
       `<br>Perímetro: ${f.perimetro_km ? f.perimetro_km.toFixed(2) : "–"} km` +
       `<br><a href="#" onclick="abrirFazenda(${f.id});return false">abrir ficha</a>`)
   )).addTo(mapa);
@@ -521,7 +522,7 @@ async function carregarMapa(){
                : p.categoria==="lead"    ? "#ffc400"
                : p.categoria==="descartada" ? "#ff5252" : "#40c4ff",
       color: "#ffffff", weight: 1.2, opacity: .9, fillOpacity: .8
-    }).bindPopup(`<b>${esc(p.nome)}</b><br>${fmt(p.area_total_ha)} ha`)
+    }).bindPopup(`<b>${esc(p.nome)}</b>` + (p.dono ? `<br>👤 ${esc(p.dono)}` : "") + `<br>${fmt(p.area_total_ha)} ha`)
       .on("click", ()=>abrirFazenda(p.id))
   ));
   camadaPontos.addTo(mapa);

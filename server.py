@@ -157,6 +157,31 @@ def _atlas_dp(pts, tol):
     return [pts[i] for i in sorted(manter)]
 
 
+def _atlas_decodifica(d):
+    """Contorno em DELTA -> lista de aneis [[lon,lat],...].
+
+    Formato: aneis separados por "|", pontos por ";", e cada ponto e a
+    DIFERENCA (em 1e-5 grau) para o ponto anterior — 13x menor que guardar
+    o geojson, sem perda visivel no mapa."""
+    aneis = []
+    for parte in str(d or "").split("|"):
+        if not parte:
+            continue
+        x = y = 0
+        anel = []
+        for par in parte.split(";"):
+            try:
+                dx, dy = par.split(",")
+                x += int(dx)
+                y += int(dy)
+            except ValueError:
+                continue
+            anel.append([x / 1e5, y / 1e5])
+        if len(anel) >= 3:
+            aneis.append(anel)
+    return aneis
+
+
 def _atlas_simplifica(anel, tol=0.0004):
     """Reduz pontos do contorno mantendo o formato (~40 m de tolerancia)."""
     if len(anel) < 30:
@@ -2807,8 +2832,11 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json(403, {"erro": "A Prospecção é para vendedores e gestores"})
         con = atlas_con()
         try:
-            tem_contorno = bool(con.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='fazenda_contorno'").fetchone())
+            # contornos: tabela nova (delta, compacta) ou a antiga (geojson)
+            tabs = {r["name"] for r in con.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+            contorno_delta = "fazenda_contorno_d" in tabs
+            tem_contorno = contorno_delta or "fazenda_contorno" in tabs
 
             if path == "/atlas-api/municipios" and method == "GET":
                 rows = con.execute(
@@ -2896,7 +2924,9 @@ class Handler(BaseHTTPRequestHandler):
                 total = con.execute("SELECT COUNT(*) c FROM fazendas f WHERE " + wtudo, params).fetchone()["c"]
                 rows = con.execute(
                     "SELECT f.id, f.nome, f.codigo_car, f.categoria, f.area_total_ha, "
-                    "f.perimetro_km, f.status_car, f.latitude, f.longitude, m.nome AS municipio "
+                    "f.perimetro_km, f.status_car, f.latitude, f.longitude, m.nome AS municipio, "
+                    "(SELECT p.nome FROM fazenda_pessoas fp JOIN pessoas p ON p.id = fp.pessoa_id "
+                    " WHERE fp.fazenda_id = f.id LIMIT 1) AS dono "
                     "FROM fazendas f LEFT JOIN municipios m ON m.id = f.municipio_id "
                     "WHERE " + wtudo + " ORDER BY f.area_total_ha DESC LIMIT ? OFFSET ?",
                     params + [20, (pagina - 1) * 20]).fetchall()
@@ -2904,11 +2934,13 @@ class Handler(BaseHTTPRequestHandler):
                                             "fazendas": [dict(r) for r in rows]})
 
             if path == "/atlas-api/pontos" and method == "GET":
-                w, params = self._atlas_escopo(qs, "")
+                w, params = self._atlas_escopo(qs)   # prefixo f. (a consulta usa alias)
                 rows = con.execute(
-                    "SELECT id, nome, latitude, longitude, area_total_ha, categoria FROM fazendas "
-                    "WHERE latitude IS NOT NULL AND " + w +
-                    " ORDER BY area_total_ha DESC LIMIT 3000", params).fetchall()
+                    "SELECT f.id, f.nome, f.latitude, f.longitude, f.area_total_ha, f.categoria, "
+                    "(SELECT p.nome FROM fazenda_pessoas fp JOIN pessoas p ON p.id = fp.pessoa_id "
+                    " WHERE fp.fazenda_id = f.id LIMIT 1) AS dono "
+                    "FROM fazendas f WHERE f.latitude IS NOT NULL AND " + w +
+                    " ORDER BY f.area_total_ha DESC LIMIT 3000", params).fetchall()
                 return self.send_json(200, [dict(r) for r in rows])
 
             if path == "/atlas-api/contornos" and method == "GET":
@@ -2927,23 +2959,30 @@ class Handler(BaseHTTPRequestHandler):
                 if cat:
                     cond.append("f.categoria = ?")
                     params.append(cat)
+                tab, col = ("fazenda_contorno_d", "d") if contorno_delta else ("fazenda_contorno", "geojson")
                 rows = con.execute(
-                    "SELECT f.id, f.nome, f.area_total_ha, f.perimetro_km, f.categoria, c.geojson "
-                    "FROM fazendas f JOIN fazenda_contorno c ON c.fazenda_id = f.id "
-                    "WHERE " + " AND ".join(cond) + " ORDER BY f.area_total_ha DESC LIMIT 1200",
-                    params).fetchall()
+                    "SELECT f.id, f.nome, f.area_total_ha, f.perimetro_km, f.categoria, c.%s AS geo, "
+                    "(SELECT p.nome FROM fazenda_pessoas fp JOIN pessoas p ON p.id = fp.pessoa_id "
+                    " WHERE fp.fazenda_id = f.id LIMIT 1) AS dono "
+                    "FROM fazendas f JOIN %s c ON c.fazenda_id = f.id "
+                    "WHERE " % (col, tab) + " AND ".join(cond) +
+                    " ORDER BY f.area_total_ha DESC LIMIT 1200", params).fetchall()
                 total = con.execute(
                     "SELECT COUNT(*) c FROM fazendas f WHERE " + " AND ".join(cond), params).fetchone()["c"]
                 saida = []
                 for r in rows:
                     try:
-                        aneis = [_atlas_simplifica(a) for a in json.loads(r["geojson"])]
+                        if contorno_delta:
+                            aneis = _atlas_decodifica(r["geo"])
+                        else:
+                            aneis = [_atlas_simplifica(a) for a in json.loads(r["geo"])]
                     except Exception:
                         continue
                     saida.append({"id": r["id"], "nome": r["nome"],
                                   "area_total_ha": r["area_total_ha"],
                                   "perimetro_km": r["perimetro_km"],
-                                  "categoria": r["categoria"], "aneis": aneis})
+                                  "categoria": r["categoria"], "dono": r["dono"],
+                                  "aneis": aneis})
                 return self.send_json(200, {"fazendas": saida, "total_na_area": total,
                                             "mostrando": len(saida)})
 
@@ -2976,7 +3015,12 @@ class Handler(BaseHTTPRequestHandler):
                                                 "registros": [dict(r) for r in registros],
                                                 "culturas": [dict(c) for c in culturas]})
                 if sub == "contorno" and method == "GET":
-                    if tem_contorno:
+                    if contorno_delta:
+                        r = con.execute("SELECT d FROM fazenda_contorno_d WHERE fazenda_id = ?",
+                                        [fid]).fetchone()
+                        if r:
+                            return self.send_json(200, {"aneis": _atlas_decodifica(r["d"])})
+                    elif tem_contorno:
                         r = con.execute("SELECT geojson FROM fazenda_contorno WHERE fazenda_id = ?",
                                         [fid]).fetchone()
                         if r:
