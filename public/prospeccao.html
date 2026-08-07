@@ -446,7 +446,7 @@ async function carregarFazendas(){
 
 /* ---- contornos das fazendas desenhados direto no mapa ---- */
 let camadaAreas, buscaAreas, avisoAreas;
-const ZOOM_CONTORNOS = 8;   // a partir daqui vale a pena desenhar os contornos
+const ZOOM_CONTORNOS = 10;   // a partir daqui vale a pena desenhar os contornos
                             // (um município inteiro cabe na tela nesse zoom)
 
 function corDa(cat){
@@ -454,18 +454,64 @@ function corDa(cat){
        : cat==="descartada" ? "#ff5252" : "#ffea00";
 }
 
+/* De LONGE mostra uma bolha por município com a contagem (assim TODAS as
+   fazendas aparecem, não só as 3.000 maiores); de perto, os contornos. */
+let camadaMunicipios, bboxRecorte = null;   // bbox das fazendas do recorte atual
+const ZOOM_PONTOS = 9;        // daqui até ZOOM_CONTORNOS: pontos individuais
+
+async function carregarBolhas(){
+  const ps = escopo();
+  const cat = document.getElementById("fCat").value;
+  if (cat) ps.set("categoria", cat);        // vazio não entra na URL
+  const d = await api("/atlas-api/mapa-municipios?" + ps);
+  if (camadaMunicipios) camadaMunicipios.remove();
+  const maior = Math.max(1, ...d.map(m => m.fazendas));
+  camadaMunicipios = L.layerGroup(d.filter(m => m.lat).map(m => {
+    const r = 12 + 26 * Math.sqrt(m.fazendas / maior);
+    return L.marker([m.lat, m.lng], {icon: L.divIcon({
+      className: "bolha-mun", iconSize: [r*2, r*2], iconAnchor: [r, r],
+      html: `<div style="width:${r*2}px;height:${r*2}px;border-radius:50%;
+             background:rgba(46,204,113,.75);border:2px solid #fff;
+             box-shadow:0 1px 6px rgba(0,0,0,.4);display:flex;align-items:center;
+             justify-content:center;color:#fff;font-weight:700;
+             font-size:${Math.max(10, Math.min(15, r/2))}px">${fmt(m.fazendas)}</div>`
+    })}).bindTooltip(`${esc(m.nome)} — ${fmt(m.fazendas)} fazendas · ${fmt(m.area_ha)} ha`)
+      .on("click", () => {   // clicar na bolha entra no município
+        const el = [...document.querySelectorAll("#listaMun .mun")]
+          .find(x => x.dataset.id === String(m.id));
+        if (el) el.click();
+      });
+  })).addTo(mapa);
+  mostrarAviso(`${fmt(d.reduce((a,m)=>a+m.fazendas,0))} fazendas em ${d.length} municípios — aproxime para ver uma a uma`);
+}
+
 async function carregarAreas(){
   if (!mapa) return;
   const z = mapa.getZoom();
-  if (z < ZOOM_CONTORNOS){                 // muito longe: mostra só os pontos
+  // com município/território escolhido o recorte já é pequeno: vai direto para
+  // os contornos, sem passar pelas bolhas (elas são para a visão do estado)
+  const recorte = !!(munAtivo || terAtivo);
+  if (!recorte && z < ZOOM_PONTOS){        // de longe: bolhas por município
+    if (camadaAreas){ camadaAreas.remove(); camadaAreas = null; }
+    if (camadaPontos && mapa.hasLayer(camadaPontos)) camadaPontos.remove();
+    await carregarBolhas();
+    return;
+  }
+  if (camadaMunicipios && mapa.hasLayer(camadaMunicipios)) camadaMunicipios.remove();
+  if (z < (recorte ? 7 : ZOOM_CONTORNOS)){ // meio do caminho: pontos
     if (camadaAreas){ camadaAreas.remove(); camadaAreas = null; }
     if (camadaPontos && !mapa.hasLayer(camadaPontos)) camadaPontos.addTo(mapa);
-    mostrarAviso("");
+    mostrarAviso("mostrando as maiores fazendas — aproxime para ver os contornos");
     return;
   }
   if (camadaPontos && mapa.hasLayer(camadaPontos)) camadaPontos.remove();
 
-  const b = mapa.getBounds();
+  let b = mapa.getBounds();
+  // container ainda sem tamanho (aba em segundo plano): a área visível vem
+  // vazia e nada seria encontrado — usa o recorte carregado como referência
+  if (Math.abs(b.getEast() - b.getWest()) < 1e-6 && bboxRecorte){
+    b = L.latLngBounds(bboxRecorte);
+  }
   const ps = escopo({norte:b.getNorth(), sul:b.getSouth(),
                      leste:b.getEast(),  oeste:b.getWest()});
   const cat = document.getElementById("fCat").value;
@@ -511,6 +557,28 @@ function mostrarAviso(txt){
   if (avisoAreas._div) avisoAreas._div._set(txt);
 }
 
+/* Enquadra sem depender do Leaflet já ter medido o container: se ele ainda
+   acha que tem largura 0 (aba em segundo plano, layout montando), o fitBounds
+   travaria no zoom máximo e o mapa viria cinza. Aqui o zoom é CALCULADO da
+   extensão geográfica com a largura real do elemento (ou 900px de reserva). */
+function enquadrarSeguro(cx){
+  const [[s, o], [n, l]] = cx;
+  const centro = [(s + n) / 2, (o + l) / 2];
+  mapa.invalidateSize();
+  if (mapa.getSize().x >= 50){
+    mapa.fitBounds(cx, {padding:[20,20], animate:false});
+  } else {
+    const el = document.getElementById("mapa");
+    const largura = el.clientWidth || 900, altura = el.clientHeight || 500;
+    const dLon = Math.max(1e-6, l - o), dLat = Math.max(1e-6, n - s);
+    const zx = Math.log2(largura * 360 / (256 * dLon));
+    const zy = Math.log2(altura * 180 / (256 * dLat));
+    const z = Math.max(3, Math.min(16, Math.floor(Math.min(zx, zy))));
+    mapa.setView(centro, z, {animate:false});
+  }
+  carregarAreas();              // enquadrou: já desenha o que couber
+}
+
 async function carregarMapa(){
   const pts = await api("/atlas-api/pontos?" + escopo());
   if (camadaPontos) camadaPontos.remove();
@@ -529,21 +597,12 @@ async function carregarMapa(){
   if (pts.length){
     const lats = pts.map(p=>p.latitude), lons = pts.map(p=>p.longitude);
     const cx = [[Math.min(...lats),Math.min(...lons)],[Math.max(...lats),Math.max(...lons)]];
+    bboxRecorte = cx;
     // ESPERA o container ter largura de verdade antes de enquadrar: se o
     // fitBounds roda com tamanho 0 (layout ainda montando), o Leaflet trava no
     // zoom máximo e pede tiles inexistentes ("Map data not yet available").
-    let tentativas = 0;
-    const meuTurno = ++turnoMapa;   // se o usuário abrir um contorno, este loop para
-    (function enquadrar(){
-      if (meuTurno !== turnoMapa) return;
-      mapa.invalidateSize();
-      if (mapa.getSize().x < 50 && ++tentativas < 20){  // ainda sem tamanho real
-        setTimeout(enquadrar, 150);
-        return;
-      }
-      mapa.fitBounds(cx, {padding:[20,20], animate:false});
-      carregarAreas();          // enquadrou: já desenha os contornos visíveis
-    })();
+    const meuTurno = ++turnoMapa;   // se o usuário abrir um contorno, este para
+    if (meuTurno === turnoMapa) enquadrarSeguro(cx);
   } else {
     carregarAreas();
   }

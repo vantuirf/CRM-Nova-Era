@@ -60,16 +60,108 @@ PUBLIC_DIR = os.path.join(BASE_DIR, "public")
 # ---------------------------------------------------------------------------
 ATLAS_GZ = os.path.join(BASE_DIR, "atlas.db.gz")
 ATLAS_DB = os.path.join(DATA_DIR, "atlas.db")
+# A "versao" dos dados e a impressao digital do proprio atlas.db.gz: gerou um
+# arquivo novo, o boot troca a base sozinho (preservando o que a equipe editou)
+# — sem depender de ninguem lembrar de subir um numero de versao.
+def _atlas_hash_gz():
+    if not os.path.exists(ATLAS_GZ):
+        return None
+    h = hashlib.sha1()
+    with open(ATLAS_GZ, "rb") as f:
+        for bloco in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(bloco)
+    return h.hexdigest()
+
+# tabelas com o TRABALHO DA EQUIPE (migram para a base nova)
+ATLAS_TABELAS_EQUIPE = ("pessoas", "fazenda_pessoas", "registros",
+                        "territorios", "territorio_municipios")
+
+
+def _atlas_versao_do(caminho):
+    try:
+        con = sqlite3.connect(caminho)
+        r = con.execute("SELECT v FROM atlas_meta LIMIT 1").fetchone()
+        con.close()
+        return r[0] if r else None
+    except Exception:
+        return None
+
+
+def _atlas_schema_equipe(con):
+    """Tabelas que guardam o trabalho da equipe (nao vem no export do Atlas)."""
+    con.executescript("""
+        CREATE TABLE IF NOT EXISTS territorios (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, nome TEXT NOT NULL,
+            criado_em TEXT DEFAULT (datetime('now','localtime')));
+        CREATE TABLE IF NOT EXISTS territorio_municipios (
+            territorio_id INTEGER NOT NULL, municipio_id INTEGER NOT NULL,
+            PRIMARY KEY (territorio_id, municipio_id));
+        CREATE TABLE IF NOT EXISTS registros (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, fazenda_id INTEGER NOT NULL,
+            autor TEXT, texto TEXT NOT NULL,
+            criado_em TEXT DEFAULT (datetime('now','localtime')));
+    """)
+
+
+def _atlas_migra_edicoes(antigo, novo):
+    """Leva as edicoes da equipe do banco ANTIGO para a base NOVA e mantem as
+    categorias que a equipe marcou (cliente/lead/descartada)."""
+    con = sqlite3.connect(novo)
+    _atlas_schema_equipe(con)   # as tabelas da equipe precisam existir aqui
+    con.execute("ATTACH ? AS velho", [antigo])
+    tabs_velho = {r[0] for r in con.execute(
+        "SELECT name FROM velho.sqlite_master WHERE type='table'").fetchall()}
+    for t in ATLAS_TABELAS_EQUIPE:
+        if t not in tabs_velho:
+            continue
+        cols_novo = [c[1] for c in con.execute("PRAGMA table_info(%s)" % t).fetchall()]
+        cols_velho = [c[1] for c in con.execute("PRAGMA velho.table_info(%s)" % t).fetchall()]
+        cols = [c for c in cols_novo if c in cols_velho]
+        if not cols:
+            continue
+        lista = ", ".join(cols)
+        con.execute("DELETE FROM %s" % t)  # a base nova vem com o import antigo
+        con.execute("INSERT OR IGNORE INTO %s (%s) SELECT %s FROM velho.%s" % (t, lista, lista, t))
+    # categorias marcadas pela equipe (casadas pelo codigo do CAR, que nao muda)
+    if "fazendas" in tabs_velho:
+        con.execute("""UPDATE fazendas SET categoria = (
+                SELECT v.categoria FROM velho.fazendas v
+                 WHERE v.codigo_car = fazendas.codigo_car)
+            WHERE EXISTS (SELECT 1 FROM velho.fazendas v
+                 WHERE v.codigo_car = fazendas.codigo_car
+                   AND v.categoria IS NOT NULL AND v.categoria <> 'sem_categoria')""")
+    con.commit()
+    con.execute("DETACH velho")
+    con.close()
 
 
 def atlas_boot():
-    if not os.path.exists(ATLAS_DB) and os.path.exists(ATLAS_GZ):
+    versao = _atlas_hash_gz()
+    if versao and _atlas_versao_do(ATLAS_DB) != versao:
         os.makedirs(DATA_DIR, exist_ok=True)
-        tmp = ATLAS_DB + ".tmp"
+        tmp = ATLAS_DB + ".novo"
         try:
             with gzip.open(ATLAS_GZ, "rb") as fin, open(tmp, "wb") as fout:
                 shutil.copyfileobj(fin, fout)
+            con = sqlite3.connect(tmp)
+            con.executescript("CREATE TABLE IF NOT EXISTS atlas_meta (v TEXT);"
+                              "DELETE FROM atlas_meta;")
+            con.execute("INSERT INTO atlas_meta (v) VALUES (?)", [versao])
+            con.commit()
+            con.close()
+            if os.path.exists(ATLAS_DB):
+                # já existe base antiga: preserva o trabalho da equipe
+                _atlas_migra_edicoes(ATLAS_DB, tmp)
+                shutil.copy2(ATLAS_DB, ATLAS_DB + ".anterior")
+                print("[atlas] base atualizada (edições da equipe preservadas)")
+            else:
+                print("[atlas] banco instalado em %s" % ATLAS_DB)
             os.replace(tmp, ATLAS_DB)
+            for sufixo in ("-wal", "-shm"):   # sobras do banco antigo
+                try:
+                    os.remove(ATLAS_DB + sufixo)
+                except OSError:
+                    pass
         except Exception:
             # descompressao pela metade (disco cheio, gz ruim): nao deixar lixo
             try:
@@ -77,25 +169,13 @@ def atlas_boot():
             except OSError:
                 pass
             raise
-        print("[atlas] banco descompactado em %s" % ATLAS_DB)
     if os.path.exists(ATLAS_DB):
         con = sqlite3.connect(ATLAS_DB)
         # WAL: leituras nunca bloqueiam e escritas concorrem melhor (fica
         # gravado no arquivo — basta uma vez)
         con.execute("PRAGMA journal_mode=WAL")
-        con.executescript("""
-            CREATE TABLE IF NOT EXISTS territorios (
-                id INTEGER PRIMARY KEY AUTOINCREMENT, nome TEXT NOT NULL,
-                criado_em TEXT DEFAULT (datetime('now','localtime')));
-            CREATE TABLE IF NOT EXISTS territorio_municipios (
-                territorio_id INTEGER NOT NULL, municipio_id INTEGER NOT NULL,
-                PRIMARY KEY (territorio_id, municipio_id));
-            CREATE TABLE IF NOT EXISTS registros (
-                id INTEGER PRIMARY KEY AUTOINCREMENT, fazenda_id INTEGER NOT NULL,
-                autor TEXT, texto TEXT NOT NULL,
-                criado_em TEXT DEFAULT (datetime('now','localtime')));
-            CREATE INDEX IF NOT EXISTS idx_faz_latlng ON fazendas(latitude, longitude);
-        """)
+        _atlas_schema_equipe(con)
+        con.execute("CREATE INDEX IF NOT EXISTS idx_faz_latlng ON fazendas(latitude, longitude)")
         # MIGRACAO CRITICA: o export "CREATE TABLE AS SELECT" perdeu a chave
         # primaria de pessoas — sem ela, lastrowid NAO corresponde ao campo id
         # e um contato novo apontaria para OUTRA pessoa (ou sumiria). Reconstroi
@@ -2941,6 +3021,23 @@ class Handler(BaseHTTPRequestHandler):
                     " WHERE fp.fazenda_id = f.id LIMIT 1) AS dono "
                     "FROM fazendas f WHERE f.latitude IS NOT NULL AND " + w +
                     " ORDER BY f.area_total_ha DESC LIMIT 3000", params).fetchall()
+                return self.send_json(200, [dict(r) for r in rows])
+
+            if path == "/atlas-api/mapa-municipios" and method == "GET":
+                # visao de longe: UMA bolha por municipio com a contagem —
+                # assim o mapa mostra TODAS as fazendas, nao so as 3.000 maiores
+                w, params = self._atlas_escopo(qs)
+                cat = (qs.get("categoria") or [""])[0]
+                if cat:
+                    w += " AND f.categoria = ?"
+                    params = params + [cat]
+                rows = con.execute(
+                    "SELECT m.id, m.nome, COUNT(*) AS fazendas, "
+                    "ROUND(SUM(f.area_total_ha)) AS area_ha, "
+                    "AVG(f.latitude) AS lat, AVG(f.longitude) AS lng "
+                    "FROM fazendas f JOIN municipios m ON m.id = f.municipio_id "
+                    "WHERE f.latitude IS NOT NULL AND " + w +
+                    " GROUP BY m.id ORDER BY COUNT(*) DESC", params).fetchall()
                 return self.send_json(200, [dict(r) for r in rows])
 
             if path == "/atlas-api/contornos" and method == "GET":
