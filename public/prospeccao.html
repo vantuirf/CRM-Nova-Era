@@ -36,9 +36,11 @@
   .kpi span{font-size:12.5px;color:#7a8794}
   .paineis{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:16px}
   @media(max-width:1000px){.paineis{grid-template-columns:1fr}}
+  /* mapa ocupa a linha inteira e cresce com a janela (fácil de trabalhar) */
+  .painel.mapa-painel{grid-column:1 / -1}
   .painel{background:#fff;border:1px solid var(--borda);border-radius:12px;overflow:hidden}
   .painel h3{font-size:14px;padding:12px 14px;border-bottom:1px solid var(--borda)}
-  #mapa{height:440px}
+  #mapa{height:min(72vh,760px);min-height:460px}
   .filtros{display:flex;gap:8px;padding:12px 14px;flex-wrap:wrap}
   .filtros input,.filtros select{padding:8px 10px;border:1px solid var(--borda);border-radius:8px;font-size:14px}
   .filtros input{flex:1;min-width:160px}
@@ -112,7 +114,7 @@
     </div>
 
     <div class="paineis">
-      <div class="painel"><h3>Mapa (maiores fazendas)</h3><div id="mapa"></div></div>
+      <div class="painel mapa-painel"><h3>Mapa (maiores fazendas)</h3><div id="mapa"></div></div>
       <div class="painel">
         <h3>Fazendas por cultura <small style="color:#9aa6b2;font-weight:400">(MapBiomas 2023)</small></h3>
         <table><tbody id="tbCult"></tbody></table>
@@ -526,16 +528,20 @@ async function carregarMapa(){
   if (pts.length){
     const lats = pts.map(p=>p.latitude), lons = pts.map(p=>p.longitude);
     const cx = [[Math.min(...lats),Math.min(...lons)],[Math.max(...lats),Math.max(...lons)]];
-    // o mapa só aceita o enquadramento depois que o navegador termina o layout;
-    // tentamos algumas vezes até o zoom fazer sentido para o estado inteiro
+    // ESPERA o container ter largura de verdade antes de enquadrar: se o
+    // fitBounds roda com tamanho 0 (layout ainda montando), o Leaflet trava no
+    // zoom máximo e pede tiles inexistentes ("Map data not yet available").
     let tentativas = 0;
     const meuTurno = ++turnoMapa;   // se o usuário abrir um contorno, este loop para
     (function enquadrar(){
       if (meuTurno !== turnoMapa) return;
       mapa.invalidateSize();
+      if (mapa.getSize().x < 50 && ++tentativas < 20){  // ainda sem tamanho real
+        setTimeout(enquadrar, 150);
+        return;
+      }
       mapa.fitBounds(cx, {padding:[20,20], animate:false});
-      if (mapa.getZoom() > 12 && ++tentativas < 10) setTimeout(enquadrar, 250);
-      else carregarAreas();     // enquadrou: já desenha os contornos visíveis
+      carregarAreas();          // enquadrou: já desenha os contornos visíveis
     })();
   } else {
     carregarAreas();
@@ -771,6 +777,26 @@ mapa.on("moveend zoomend", () => {
   clearTimeout(buscaAreas);
   buscaAreas = setTimeout(carregarAreas, 350);
 });
+
+/* o mapa é grande e a página tem rolagem/redimensionamento: sempre que o
+   container muda de tamanho o Leaflet precisa recalcular (senão pede os
+   tiles errados e mostra "Map data not yet available"). */
+let ajusteMapa, larguraMapaAnt = 0;
+function reajustaMapa(){
+  clearTimeout(ajusteMapa);
+  ajusteMapa = setTimeout(() => {
+    const larg = document.getElementById("mapa").clientWidth;
+    if (larg < 50) return;                 // ainda sem tamanho: ignora
+    mapa.invalidateSize();
+    // a largura MUDOU de verdade (0 -> real, ou o usuário redimensionou):
+    // reenquadra para o recorte atual, senão o mapa fica preso num zoom errado
+    if (Math.abs(larg - larguraMapaAnt) > 30){ larguraMapaAnt = larg; carregarMapa(); }
+  }, 200);
+}
+if (window.ResizeObserver){
+  new ResizeObserver(reajustaMapa).observe(document.getElementById("mapa"));
+}
+window.addEventListener("resize", reajustaMapa);
 
 carregarUsuario();
 carregarMunicipios();
