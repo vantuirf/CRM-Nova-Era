@@ -22,6 +22,8 @@ import base64
 import hashlib
 import secrets
 import shutil
+import sqlite3
+import gzip
 import threading
 import time
 import unicodedata
@@ -35,9 +37,6 @@ import urllib.error
 # Configuracao
 # ---------------------------------------------------------------------------
 PORT = int(os.environ.get("PORT", "3000"))
-# Atlas de prospecção: serviço local com o mapa das fazendas (ver pasta atlas-agro).
-# O CRM repassa /atlas-api/* para ele, sempre exigindo sessão.
-ATLAS_URL = os.environ.get("ATLAS_URL", "http://127.0.0.1:8765")
 
 # Token do webhook (protege o endpoint). Prioridade: variavel de ambiente
 # WEBHOOK_TOKEN; senao, um token aleatorio persistido no banco (settings) na
@@ -51,6 +50,282 @@ DATA_DIR = os.environ.get("DATA_DIR") or os.path.join(BASE_DIR, "data")
 DB_FILE = os.path.join(DATA_DIR, "leads.json")
 FOTOS_DIR = os.path.join(DATA_DIR, "fotos")  # fotos das visitas de campo
 PUBLIC_DIR = os.path.join(BASE_DIR, "public")
+
+# ---------------------------------------------------------------------------
+# ATLAS (prospeccao): banco SQLite com as 242 mil fazendas de Goias (SICAR +
+# MapBiomas), compactado no repositorio (atlas.db.gz) e descompactado para
+# data/atlas.db no primeiro boot. data/ fica fora do git — as edicoes da
+# equipe (categorias, contatos, registros, territorios) vivem la e NAO sao
+# sobrescritas em deploys (so descompacta se o arquivo ainda nao existe).
+# ---------------------------------------------------------------------------
+ATLAS_GZ = os.path.join(BASE_DIR, "atlas.db.gz")
+ATLAS_DB = os.path.join(DATA_DIR, "atlas.db")
+
+
+def atlas_boot():
+    if not os.path.exists(ATLAS_DB) and os.path.exists(ATLAS_GZ):
+        os.makedirs(DATA_DIR, exist_ok=True)
+        tmp = ATLAS_DB + ".tmp"
+        try:
+            with gzip.open(ATLAS_GZ, "rb") as fin, open(tmp, "wb") as fout:
+                shutil.copyfileobj(fin, fout)
+            os.replace(tmp, ATLAS_DB)
+        except Exception:
+            # descompressao pela metade (disco cheio, gz ruim): nao deixar lixo
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+            raise
+        print("[atlas] banco descompactado em %s" % ATLAS_DB)
+    if os.path.exists(ATLAS_DB):
+        con = sqlite3.connect(ATLAS_DB)
+        # WAL: leituras nunca bloqueiam e escritas concorrem melhor (fica
+        # gravado no arquivo — basta uma vez)
+        con.execute("PRAGMA journal_mode=WAL")
+        con.executescript("""
+            CREATE TABLE IF NOT EXISTS territorios (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, nome TEXT NOT NULL,
+                criado_em TEXT DEFAULT (datetime('now','localtime')));
+            CREATE TABLE IF NOT EXISTS territorio_municipios (
+                territorio_id INTEGER NOT NULL, municipio_id INTEGER NOT NULL,
+                PRIMARY KEY (territorio_id, municipio_id));
+            CREATE TABLE IF NOT EXISTS registros (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, fazenda_id INTEGER NOT NULL,
+                autor TEXT, texto TEXT NOT NULL,
+                criado_em TEXT DEFAULT (datetime('now','localtime')));
+            CREATE INDEX IF NOT EXISTS idx_faz_latlng ON fazendas(latitude, longitude);
+        """)
+        # MIGRACAO CRITICA: o export "CREATE TABLE AS SELECT" perdeu a chave
+        # primaria de pessoas — sem ela, lastrowid NAO corresponde ao campo id
+        # e um contato novo apontaria para OUTRA pessoa (ou sumiria). Reconstroi
+        # a tabela com INTEGER PRIMARY KEY preservando os ids existentes.
+        info = con.execute("PRAGMA table_info(pessoas)").fetchall()
+        id_e_pk = any(c[1] == "id" and c[5] == 1 for c in info)
+        if not id_e_pk:
+            con.executescript("""
+                BEGIN;
+                CREATE TABLE pessoas_pk (
+                    id INTEGER PRIMARY KEY, nome TEXT, tipo TEXT,
+                    documento TEXT, telefone TEXT, email TEXT);
+                INSERT INTO pessoas_pk (id, nome, tipo, documento, telefone, email)
+                    SELECT id, nome, tipo, documento, telefone, email
+                    FROM pessoas WHERE id IS NOT NULL;
+                DROP TABLE pessoas;
+                ALTER TABLE pessoas_pk RENAME TO pessoas;
+                COMMIT;
+            """)
+            print("[atlas] tabela pessoas migrada para chave primaria de verdade")
+        con.commit()
+        con.close()
+
+
+def atlas_con():
+    con = sqlite3.connect(ATLAS_DB, timeout=15)
+    con.row_factory = sqlite3.Row
+    return con
+
+
+# planilhas em analise na importacao do Atlas (token -> linhas), em memoria
+_atlas_imports = {}
+
+
+def _atlas_dp(pts, tol):
+    """Douglas-Peucker sobre uma linha aberta (portado do atlas-agro)."""
+    if len(pts) < 3:
+        return pts
+    pilha, manter = [(0, len(pts) - 1)], {0, len(pts) - 1}
+    while pilha:
+        ini, fim = pilha.pop()
+        x1, y1 = pts[ini]
+        x2, y2 = pts[fim]
+        dx, dy = x2 - x1, y2 - y1
+        norma = (dx * dx + dy * dy) ** 0.5
+        pior, idx = 0.0, -1
+        for i in range(ini + 1, fim):
+            x0, y0 = pts[i]
+            if norma:
+                d = abs(dy * x0 - dx * y0 + x2 * y1 - y2 * x1) / norma
+            else:
+                d = ((x0 - x1) ** 2 + (y0 - y1) ** 2) ** 0.5
+            if d > pior:
+                pior, idx = d, i
+        if pior > tol and idx > 0:
+            manter.add(idx)
+            pilha.append((ini, idx))
+            pilha.append((idx, fim))
+    return [pts[i] for i in sorted(manter)]
+
+
+def _atlas_simplifica(anel, tol=0.0004):
+    """Reduz pontos do contorno mantendo o formato (~40 m de tolerancia)."""
+    if len(anel) < 30:
+        return anel
+    fechado = anel[0] == anel[-1]
+    pts = anel[:-1] if fechado else anel
+    meio = len(pts) // 2
+    saida = _atlas_dp(pts[:meio + 1], tol) + _atlas_dp(pts[meio:], tol)[1:]
+    if fechado and saida and saida[0] != saida[-1]:
+        saida.append(saida[0])
+    return saida if len(saida) >= 4 else anel
+
+
+def _atlas_le_planilha(nome, dados):
+    """(abas, cabecalho, linhas) de um CSV (stdlib) ou XLSX (se houver openpyxl)."""
+    if nome.lower().endswith(".csv"):
+        texto = dados.decode("utf-8-sig", "replace")
+        amostra = texto[:8192]
+        try:
+            sep = csv.Sniffer().sniff(amostra, delimiters=",;\t").delimiter
+        except Exception:
+            sep = ";" if amostra.count(";") > amostra.count(",") else ","
+        linhas = list(csv.reader(io.StringIO(texto), delimiter=sep))
+        return ["(csv)"], (linhas[0] if linhas else []), linhas[1:100001]
+    try:
+        import openpyxl  # opcional; sem ele orientamos salvar como CSV
+    except ImportError:
+        raise ValueError("este servidor lê só .csv — no Excel use Arquivo → Salvar como → CSV e envie de novo")
+    wb = openpyxl.load_workbook(io.BytesIO(dados), read_only=True, data_only=True)
+    abas = wb.sheetnames
+    ws = wb[abas[0]]
+    it = ws.iter_rows(values_only=True)
+    cab = [str(c) if c is not None else "" for c in next(it, [])]
+    linhas = []
+    for i, r in enumerate(it):
+        if i >= 100000:
+            break
+        linhas.append(list(r))
+    wb.close()
+    return abas, cab, linhas
+
+
+def _atlas_dentro(poligono, x, y):
+    """Ponto dentro do poligono (algoritmo do raio)."""
+    dentro = False
+    n = len(poligono)
+    for i in range(n):
+        x1, y1 = poligono[i]
+        x2, y2 = poligono[(i + 1) % n]
+        if (y1 > y) != (y2 > y):
+            xi = (x2 - x1) * (y - y1) / ((y2 - y1) or 1e-15) + x1
+            if x < xi:
+                dentro = not dentro
+    return dentro
+
+
+def _atlas_acha_fazenda(con, tem_contorno, car=None, lat=None, lon=None, nome=None, municipio=None):
+    """A qual fazenda a linha da planilha se refere (CAR > coordenada > nome)."""
+    if car:
+        r = con.execute("SELECT id FROM fazendas WHERE codigo_car = ?", [str(car).strip()]).fetchone()
+        if r:
+            return r["id"], "código CAR"
+    if lat is not None and lon is not None:
+        d = 0.05  # ~5 km
+        cands = con.execute(
+            "SELECT id, latitude, longitude FROM fazendas "
+            "WHERE latitude BETWEEN ? AND ? AND longitude BETWEEN ? AND ?",
+            [lat - d, lat + d, lon - d, lon + d]).fetchall()
+        melhor, dist = None, None
+        for c in cands:
+            if tem_contorno:
+                g = con.execute("SELECT geojson FROM fazenda_contorno WHERE fazenda_id = ?",
+                                [c["id"]]).fetchone()
+                if g:
+                    try:
+                        for anel in json.loads(g["geojson"]):
+                            if _atlas_dentro(anel, lon, lat):
+                                return c["id"], "coordenada dentro do contorno"
+                    except Exception:
+                        pass
+            dd = (c["latitude"] - lat) ** 2 + (c["longitude"] - lon) ** 2
+            if dist is None or dd < dist:
+                melhor, dist = c["id"], dd
+        if melhor and dist is not None and dist ** 0.5 < 0.02:  # ate ~2 km
+            return melhor, "coordenada próxima"
+    if nome and municipio:
+        r = con.execute(
+            "SELECT f.id FROM fazendas f JOIN municipios m ON m.id = f.municipio_id "
+            "WHERE UPPER(f.nome) = UPPER(?) AND UPPER(m.nome) = UPPER(?) LIMIT 1",
+            [str(nome).strip(), str(municipio).strip()]).fetchone()
+        if r:
+            return r["id"], "nome + município"
+    return None, None
+
+
+def _atlas_importa(con, linhas, mapa, categoria, origem, tem_contorno):
+    """Importa a planilha de contatos p/ o Atlas (portado do atlas-agro)."""
+    def val(linha, campo):
+        i = mapa.get(campo)
+        if i is None or i == "" or int(i) >= len(linha):
+            return None
+        v = linha[int(i)]
+        if v is None:
+            return None
+        v = str(v).strip()
+        return v or None
+
+    def num(linha, campo):
+        v = val(linha, campo)
+        if v is None:
+            return None
+        try:
+            return float(v.replace(",", "."))
+        except ValueError:
+            return None
+
+    criadas = ligadas = sem_fazenda = sem_nome = 0
+    por_metodo = {}
+    for n_linha, linha in enumerate(linhas):
+        if n_linha and n_linha % 200 == 0:
+            con.commit()  # solta a trava de escrita: o resto da equipe nao trava
+        nome = val(linha, "nome")
+        if not nome:
+            sem_nome += 1
+            continue
+        doc = val(linha, "documento")
+        tel = val(linha, "telefone")
+        email = val(linha, "email")
+        pessoa = None
+        if doc:
+            r = con.execute("SELECT id FROM pessoas WHERE documento = ?", [doc]).fetchone()
+            if r:
+                pessoa = r["id"]
+        if pessoa is None:
+            r = con.execute("SELECT id FROM pessoas WHERE UPPER(nome) = UPPER(?)", [nome]).fetchone()
+            pessoa = r["id"] if r else None
+        if pessoa is None:
+            tipo = "juridica" if doc and len(re.sub(r"\D", "", doc)) == 14 else "fisica"
+            cur = con.execute(
+                "INSERT INTO pessoas (nome, tipo, documento, telefone, email) VALUES (?,?,?,?,?)",
+                [nome, tipo, doc, tel, email])
+            pessoa = cur.lastrowid
+            criadas += 1
+        else:
+            con.execute(
+                "UPDATE pessoas SET telefone = COALESCE(telefone, ?), "
+                "email = COALESCE(email, ?), documento = COALESCE(documento, ?) WHERE id = ?",
+                [tel, email, doc, pessoa])
+        fid, metodo = _atlas_acha_fazenda(
+            con, tem_contorno, car=val(linha, "codigo_car"), lat=num(linha, "latitude"),
+            lon=num(linha, "longitude"), nome=val(linha, "fazenda"),
+            municipio=val(linha, "municipio"))
+        if fid:
+            con.execute(
+                "INSERT OR IGNORE INTO fazenda_pessoas "
+                "(fazenda_id, pessoa_id, relacao_fundiaria, relacao_comercial) VALUES (?,?,?,?)",
+                [fid, pessoa, val(linha, "relacao") or "proprietario",
+                 categoria if categoria in ("cliente", "lead") else "nao_definida"])
+            if categoria in ("cliente", "lead", "descartada"):
+                con.execute("UPDATE fazendas SET categoria = ? WHERE id = ?", [categoria, fid])
+            con.execute("INSERT INTO registros (fazenda_id, autor, texto) VALUES (?,?,?)",
+                        [fid, origem, "Contato importado: %s%s" % (nome, (" · " + tel) if tel else "")])
+            ligadas += 1
+            por_metodo[metodo] = por_metodo.get(metodo, 0) + 1
+        else:
+            sem_fazenda += 1
+    return {"ok": True, "linhas": len(linhas), "pessoas_novas": criadas,
+            "ligadas_a_fazenda": ligadas, "sem_fazenda": sem_fazenda,
+            "sem_nome": sem_nome, "como_ligou": por_metodo}
 
 # Tipos de resultado de visita aceitos
 RESULTADOS_VISITA = (
@@ -2469,56 +2744,342 @@ class Handler(BaseHTTPRequestHandler):
             raise ValueError("esperado um objeto JSON")
         return data
 
-    # -- Atlas de prospecção (repassa para o serviço local do mapa) --
-    def handle_atlas(self, method, parsed):
-        """A tela de Prospecção consulta o Atlas (mapa de fazendas), que roda
-        como servico local na porta ATLAS_PORT. Aqui so repassamos o pedido,
-        exigindo sessao do CRM — o Atlas nunca fica exposto sozinho."""
-        user = usuario_da_sessao(self._cookie("sessao"))
-        if not user:
-            return self.send_json(401, {"error": "Faca login no CRM"})
-
-        destino = "%s/api/%s" % (ATLAS_URL, parsed.path[len("/atlas-api/"):])
-        if parsed.query:
-            destino += "?" + parsed.query
-        corpo = None
-        if method in ("POST", "PATCH", "PUT"):
-            tam = int(self.headers.get("Content-Length") or 0)
-            corpo = self.rfile.read(tam) if tam > 0 else b"{}"
-
-        req = urllib.request.Request(destino, data=corpo, method=method)
-        if corpo is not None:
-            req.add_header("Content-Type", self.headers.get("Content-Type") or "application/json")
-        req.add_header("X-Usuario", user.get("nome") or "")
+    # -- Atlas de prospeccao (embutido: consulta o data/atlas.db local) --
+    def _atlas_escopo(self, qs, prefixo="f."):
+        """WHERE conforme municipio, territorio, area minima e cultura."""
+        cond, params = ["1=1"], []
+        mun = (qs.get("municipio_id") or [""])[0]
+        ter = (qs.get("territorio_id") or [""])[0]
+        if ter.isdigit():
+            cond.append(prefixo + "municipio_id IN (SELECT municipio_id FROM "
+                        "territorio_municipios WHERE territorio_id = ?)")
+            params.append(int(ter))
+        elif mun.isdigit():
+            cond.append(prefixo + "municipio_id = ?")
+            params.append(int(mun))
+        amin = (qs.get("area_min") or [""])[0]
         try:
-            with urllib.request.urlopen(req, timeout=120) as r:
-                dados, status = r.read(), r.status
-                ctype = r.headers.get("Content-Type", "application/json")
-        except urllib.error.HTTPError as e:
-            dados, status, ctype = e.read(), e.code, "application/json"
-        except Exception:
-            return self.send_json(503, {"error": "O mapa de prospecção está fora do ar. "
-                                                 "Inicie o Atlas (atlas-agro/iniciar.command)."})
-        self.send_response(status)
-        self.send_header("Content-Type", ctype)
-        self.send_header("Content-Length", str(len(dados)))
-        self.headers_seguranca()
-        self.end_headers()
-        self.wfile.write(dados)
+            if amin:
+                cond.append(prefixo + "area_total_ha >= ?")
+                params.append(float(amin))
+        except ValueError:
+            pass
+        cult = (qs.get("cultura") or [""])[0]
+        if cult.isdigit():
+            try:
+                cmin = float((qs.get("cultura_min") or ["0"])[0] or 0)
+            except ValueError:
+                cmin = 0.0
+            cond.append(prefixo + "id IN (SELECT fc.fazenda_id FROM fazenda_culturas fc "
+                        "WHERE fc.cultura_id = ? AND fc.area_ha >= ? "
+                        "AND fc.safra = (SELECT MAX(safra) FROM fazenda_culturas))")
+            params += [int(cult), cmin]
+        return " AND ".join(cond), params
+
+    def _multipart_arquivo(self):
+        """Extrai (nome, bytes) do primeiro arquivo de um POST multipart."""
+        ctype = self.headers.get("Content-Type") or ""
+        m = re.search(r'boundary="?([^";]+)"?', ctype)
+        tam = int(self.headers.get("Content-Length") or 0)
+        if not m or tam <= 0 or tam > 30 * 1024 * 1024:
+            return None, None
+        corpo = self.rfile.read(tam)
+        for parte in corpo.split(b"--" + m.group(1).encode()):
+            if b"filename=" not in parte:
+                continue
+            cab, _, dados = parte.partition(b"\r\n\r\n")
+            mm = re.search(rb'filename="([^"]*)"', cab)
+            nome = mm.group(1).decode("utf-8", "replace") if mm else "arquivo"
+            if dados.endswith(b"\r\n"):
+                dados = dados[:-2]
+            return nome, dados
+        return None, None
+
+    def handle_atlas(self, method, path, qs, user, gestor):
+        """API do Atlas de prospeccao (242 mil fazendas de Goias), servida do
+        data/atlas.db. Portada do atlas-agro/app.py — mesmas rotas e formatos.
+        Sem a tabela de contornos (versao compacta), o mapa cai para pontos."""
+        if not os.path.exists(ATLAS_DB):
+            return self.send_json(503, {"erro": "O Atlas ainda não está instalado neste servidor"})
+        # Prospeccao e trabalho de venda: SDR nao acessa (a API guarda CPF/
+        # telefone de produtores — mesmo modelo de acesso dos leads)
+        if user["papel"] not in ("admin", "gerente", "vendedor"):
+            return self.send_json(403, {"erro": "A Prospecção é para vendedores e gestores"})
+        con = atlas_con()
+        try:
+            tem_contorno = bool(con.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='fazenda_contorno'").fetchone())
+
+            if path == "/atlas-api/municipios" and method == "GET":
+                rows = con.execute(
+                    """SELECT m.id, m.nome, m.uf, COUNT(f.id) AS fazendas,
+                              ROUND(COALESCE(SUM(f.area_total_ha),0),0) AS area_ha
+                       FROM municipios m LEFT JOIN fazendas f ON f.municipio_id = m.id
+                       GROUP BY m.id ORDER BY m.nome""").fetchall()
+                return self.send_json(200, [dict(r) for r in rows])
+
+            if path == "/atlas-api/territorios" and method == "GET":
+                rows = con.execute(
+                    """SELECT t.id, t.nome, COUNT(DISTINCT tm.municipio_id) AS municipios,
+                              COUNT(f.id) AS fazendas,
+                              ROUND(COALESCE(SUM(f.area_total_ha),0),0) AS area_ha
+                       FROM territorios t
+                       LEFT JOIN territorio_municipios tm ON tm.territorio_id = t.id
+                       LEFT JOIN fazendas f ON f.municipio_id = tm.municipio_id
+                       GROUP BY t.id ORDER BY t.nome""").fetchall()
+                return self.send_json(200, [dict(r) for r in rows])
+
+            if path == "/atlas-api/territorios" and method == "POST":
+                if not gestor:
+                    return self.send_json(403, {"erro": "Só gerente/administrador cria territórios"})
+                d = self.read_body()
+                nome = str(d.get("nome") or "").strip()[:80]
+                muns = [int(m) for m in (d.get("municipios") or []) if str(m).isdigit()]
+                if not nome or not muns:
+                    return self.send_json(400, {"erro": "informe nome e ao menos um município"})
+                cur = con.execute("INSERT INTO territorios (nome) VALUES (?)", [nome])
+                con.executemany(
+                    "INSERT OR IGNORE INTO territorio_municipios (territorio_id, municipio_id) VALUES (?,?)",
+                    [(cur.lastrowid, m) for m in muns])
+                con.commit()
+                return self.send_json(200, {"ok": True, "id": cur.lastrowid})
+
+            mter = re.match(r"^/atlas-api/territorios/(\d+)$", path)
+            if mter and method == "DELETE":
+                if not gestor:
+                    return self.send_json(403, {"erro": "Só gerente/administrador exclui territórios"})
+                con.execute("DELETE FROM territorio_municipios WHERE territorio_id = ?", [int(mter.group(1))])
+                con.execute("DELETE FROM territorios WHERE id = ?", [int(mter.group(1))])
+                con.commit()
+                return self.send_json(200, {"ok": True})
+
+            if path == "/atlas-api/culturas" and method == "GET":
+                w, p = self._atlas_escopo(qs)
+                rows = con.execute(
+                    "SELECT c.id, c.nome, COUNT(*) AS fazendas, ROUND(SUM(fc.area_ha)) AS area_ha "
+                    "FROM fazenda_culturas fc JOIN culturas c ON c.id = fc.cultura_id "
+                    "JOIN fazendas f ON f.id = fc.fazenda_id "
+                    "WHERE fc.safra = (SELECT MAX(safra) FROM fazenda_culturas) AND " + w +
+                    " GROUP BY c.id ORDER BY SUM(fc.area_ha) DESC", p).fetchall()
+                total = con.execute("SELECT COUNT(*) c FROM fazendas f WHERE " + w, p).fetchone()["c"]
+                return self.send_json(200, {"total_fazendas": total,
+                                            "culturas": [dict(r) for r in rows]})
+
+            if path == "/atlas-api/resumo" and method == "GET":
+                w, p = self._atlas_escopo(qs, "")
+                tot = con.execute(
+                    "SELECT COUNT(*) AS fazendas, ROUND(COALESCE(SUM(area_total_ha),0),0) AS area_ha, "
+                    "ROUND(COALESCE(AVG(area_total_ha),0),1) AS tamanho_medio FROM fazendas WHERE " + w,
+                    p).fetchone()
+                cats = con.execute(
+                    "SELECT categoria, COUNT(*) qtde FROM fazendas WHERE " + w + " GROUP BY categoria",
+                    p).fetchall()
+                return self.send_json(200, {"totais": dict(tot),
+                                            "categorias": [dict(c) for c in cats]})
+
+            if path == "/atlas-api/fazendas" and method == "GET":
+                busca = ((qs.get("busca") or [""])[0]).strip()
+                cat = (qs.get("categoria") or [""])[0]
+                try:
+                    pagina = max(1, int((qs.get("pagina") or ["1"])[0]))
+                except ValueError:
+                    pagina = 1
+                w, params = self._atlas_escopo(qs)
+                where = [w]
+                if cat:
+                    where.append("f.categoria = ?")
+                    params.append(cat)
+                if busca:
+                    where.append("(f.nome LIKE ? OR f.codigo_car LIKE ?)")
+                    params += ["%" + busca + "%", "%" + busca + "%"]
+                wtudo = " AND ".join(where)
+                total = con.execute("SELECT COUNT(*) c FROM fazendas f WHERE " + wtudo, params).fetchone()["c"]
+                rows = con.execute(
+                    "SELECT f.id, f.nome, f.codigo_car, f.categoria, f.area_total_ha, "
+                    "f.perimetro_km, f.status_car, f.latitude, f.longitude, m.nome AS municipio "
+                    "FROM fazendas f LEFT JOIN municipios m ON m.id = f.municipio_id "
+                    "WHERE " + wtudo + " ORDER BY f.area_total_ha DESC LIMIT ? OFFSET ?",
+                    params + [20, (pagina - 1) * 20]).fetchall()
+                return self.send_json(200, {"total": total, "pagina": pagina, "por_pagina": 20,
+                                            "fazendas": [dict(r) for r in rows]})
+
+            if path == "/atlas-api/pontos" and method == "GET":
+                w, params = self._atlas_escopo(qs, "")
+                rows = con.execute(
+                    "SELECT id, nome, latitude, longitude, area_total_ha, categoria FROM fazendas "
+                    "WHERE latitude IS NOT NULL AND " + w +
+                    " ORDER BY area_total_ha DESC LIMIT 3000", params).fetchall()
+                return self.send_json(200, [dict(r) for r in rows])
+
+            if path == "/atlas-api/contornos" and method == "GET":
+                if not tem_contorno:
+                    return self.send_json(200, {"fazendas": [], "total_na_area": 0,
+                                                "mostrando": 0, "sem_contornos": True})
+                try:
+                    n = float((qs.get("norte") or [""])[0]); s = float((qs.get("sul") or [""])[0])
+                    le = float((qs.get("leste") or [""])[0]); o = float((qs.get("oeste") or [""])[0])
+                except ValueError:
+                    return self.send_json(400, {"fazendas": [], "erro": "área do mapa não informada"})
+                w, params = self._atlas_escopo(qs)
+                cond = [w, "f.latitude BETWEEN ? AND ?", "f.longitude BETWEEN ? AND ?"]
+                params = params + [s, n, o, le]
+                cat = (qs.get("categoria") or [""])[0]
+                if cat:
+                    cond.append("f.categoria = ?")
+                    params.append(cat)
+                rows = con.execute(
+                    "SELECT f.id, f.nome, f.area_total_ha, f.perimetro_km, f.categoria, c.geojson "
+                    "FROM fazendas f JOIN fazenda_contorno c ON c.fazenda_id = f.id "
+                    "WHERE " + " AND ".join(cond) + " ORDER BY f.area_total_ha DESC LIMIT 1200",
+                    params).fetchall()
+                total = con.execute(
+                    "SELECT COUNT(*) c FROM fazendas f WHERE " + " AND ".join(cond), params).fetchone()["c"]
+                saida = []
+                for r in rows:
+                    try:
+                        aneis = [_atlas_simplifica(a) for a in json.loads(r["geojson"])]
+                    except Exception:
+                        continue
+                    saida.append({"id": r["id"], "nome": r["nome"],
+                                  "area_total_ha": r["area_total_ha"],
+                                  "perimetro_km": r["perimetro_km"],
+                                  "categoria": r["categoria"], "aneis": aneis})
+                return self.send_json(200, {"fazendas": saida, "total_na_area": total,
+                                            "mostrando": len(saida)})
+
+            mfz = re.match(r"^/atlas-api/fazenda/(\d+)(?:/(\w+))?$", path)
+            if mfz:
+                fid = int(mfz.group(1))
+                sub = mfz.group(2) or ""
+                if not con.execute("SELECT 1 FROM fazendas WHERE id = ?", [fid]).fetchone():
+                    return self.send_json(404, {"erro": "não encontrada"})
+                if not sub and method == "GET":
+                    f = con.execute(
+                        "SELECT f.*, m.nome AS municipio, m.uf FROM fazendas f "
+                        "LEFT JOIN municipios m ON m.id = f.municipio_id WHERE f.id = ?",
+                        [fid]).fetchone()
+                    if not f:
+                        return self.send_json(404, {"erro": "não encontrada"})
+                    pessoas = con.execute(
+                        "SELECT p.*, fp.relacao_fundiaria, fp.relacao_comercial "
+                        "FROM fazenda_pessoas fp JOIN pessoas p ON p.id = fp.pessoa_id "
+                        "WHERE fp.fazenda_id = ?", [fid]).fetchall()
+                    registros = con.execute(
+                        "SELECT * FROM registros WHERE fazenda_id = ? ORDER BY criado_em DESC",
+                        [fid]).fetchall()
+                    culturas = con.execute(
+                        "SELECT c.nome, fc.safra, fc.area_ha FROM fazenda_culturas fc "
+                        "JOIN culturas c ON c.id = fc.cultura_id WHERE fc.fazenda_id = ? "
+                        "ORDER BY fc.safra DESC, fc.area_ha DESC", [fid]).fetchall()
+                    return self.send_json(200, {"fazenda": dict(f),
+                                                "pessoas": [dict(p) for p in pessoas],
+                                                "registros": [dict(r) for r in registros],
+                                                "culturas": [dict(c) for c in culturas]})
+                if sub == "contorno" and method == "GET":
+                    if tem_contorno:
+                        r = con.execute("SELECT geojson FROM fazenda_contorno WHERE fazenda_id = ?",
+                                        [fid]).fetchone()
+                        if r:
+                            try:
+                                return self.send_json(200, {"aneis": json.loads(r["geojson"])})
+                            except Exception:
+                                pass
+                    return self.send_json(200, {"aneis": []})
+                if sub == "categoria" and method == "POST":
+                    cat = (self.read_body().get("categoria") or "")
+                    if cat not in ("cliente", "lead", "descartada", "sem_categoria"):
+                        return self.send_json(400, {"erro": "categoria inválida"})
+                    con.execute("UPDATE fazendas SET categoria = ? WHERE id = ?", [cat, fid])
+                    con.commit()
+                    return self.send_json(200, {"ok": True})
+                if sub == "registro" and method == "POST":
+                    texto = str(self.read_body().get("texto") or "").strip()[:2000]
+                    if not texto:
+                        return self.send_json(400, {"erro": "texto vazio"})
+                    con.execute("INSERT INTO registros (fazenda_id, autor, texto) VALUES (?,?,?)",
+                                [fid, user["nome"], texto])
+                    con.commit()
+                    return self.send_json(200, {"ok": True})
+                if sub == "proprietario" and method == "POST":
+                    d = self.read_body()
+                    nome = str(d.get("nome") or "").strip()[:120]
+                    if not nome:
+                        return self.send_json(400, {"erro": "nome vazio"})
+                    doc = str(d.get("documento") or "").strip()[:20] or None
+                    tipo = "juridica" if doc and len(re.sub(r"\D", "", doc)) == 14 else "fisica"
+                    cur = con.execute(
+                        "INSERT INTO pessoas (nome, tipo, documento, telefone, email) VALUES (?,?,?,?,?)",
+                        [nome, tipo, doc, str(d.get("telefone") or "").strip()[:40] or None,
+                         str(d.get("email") or "").strip()[:120] or None])
+                    con.execute(
+                        "INSERT OR IGNORE INTO fazenda_pessoas "
+                        "(fazenda_id, pessoa_id, relacao_fundiaria, relacao_comercial) VALUES (?,?,?,?)",
+                        [fid, cur.lastrowid, str(d.get("relacao_fundiaria") or "proprietario")[:30],
+                         str(d.get("relacao_comercial") or "nao_definida")[:30]])
+                    con.commit()
+                    return self.send_json(200, {"ok": True})
+
+            if path == "/atlas-api/importar/analisar" and method == "POST":
+                if not gestor:
+                    return self.send_json(403, {"erro": "Só gerente/administrador importa planilhas"})
+                nomearq, dados = self._multipart_arquivo()
+                if not nomearq or dados is None:
+                    return self.send_json(400, {"erro": "nenhum arquivo enviado"})
+                ext = os.path.splitext(nomearq)[1].lower()
+                if ext not in (".csv", ".xlsx", ".xlsm"):
+                    return self.send_json(400, {"erro": "formato não suportado — use .xlsx ou .csv"})
+                try:
+                    abas, cab, linhas = _atlas_le_planilha(nomearq, dados)
+                except Exception as e:
+                    return self.send_json(400, {"erro": "não consegui ler o arquivo: %s" % e})
+                token = secrets.token_hex(12)
+                # guarda em memoria (max 3 analises simultaneas; limpa as velhas)
+                while len(_atlas_imports) >= 3:
+                    _atlas_imports.pop(next(iter(_atlas_imports)))
+                _atlas_imports[token] = {"linhas": linhas}
+                amostra = [[("" if v is None else str(v))[:40] for v in l] for l in linhas[:5]]
+                return self.send_json(200, {"token": token, "arquivo": nomearq, "abas": abas,
+                                            "colunas": cab, "total_linhas": len(linhas),
+                                            "amostra": amostra})
+
+            if path == "/atlas-api/importar/executar" and method == "POST":
+                if not gestor:
+                    return self.send_json(403, {"erro": "Só gerente/administrador importa planilhas"})
+                d = self.read_body()
+                reg = _atlas_imports.pop(str(d.get("token") or ""), None)
+                if not reg:
+                    return self.send_json(400, {"erro": "sessão de importação expirada — envie o arquivo de novo"})
+                res = _atlas_importa(con, reg["linhas"], d.get("mapa") or {},
+                                     d.get("categoria") or None,
+                                     (str(d.get("origem") or "").strip() or "Importação de planilha"),
+                                     tem_contorno)
+                con.commit()
+                return self.send_json(200, res)
+        except sqlite3.Error as e:
+            print("Erro no atlas:", e)
+            return self.send_json(500, {"erro": "Erro no banco do Atlas"})
+        finally:
+            con.close()
+        return self.send_json(404, {"erro": "Não encontrado"})
 
     # -- roteamento --
     def do_GET(self):
         parsed = urlparse(self.path)
         path = parsed.path
-        if path.startswith("/atlas-api/"):
-            return self.handle_atlas("GET", parsed)
-        if path.startswith("/api/"):
+        if path.startswith("/api/") or path.startswith("/atlas-api/"):
             return self.handle_api("GET", parsed)
-        if path == "/prospeccao.html" and not usuario_da_sessao(self._cookie("sessao")):
-            self.send_response(302)
-            self.send_header("Location", "/login.html")
-            self.end_headers()
-            return
+        if path == "/prospeccao.html":
+            u = usuario_da_sessao(self._cookie("sessao"))
+            if not u:
+                self.send_response(302)
+                self.send_header("Location", "/login.html")
+                self.end_headers()
+                return
+            if u["papel"] not in ("admin", "gerente", "vendedor"):
+                self.send_response(302)
+                self.send_header("Location", "/")
+                self.end_headers()
+                return
         return self.serve_static(path)
 
     def do_POST(self):
@@ -2526,9 +3087,7 @@ class Handler(BaseHTTPRequestHandler):
         path = parsed.path
         if path == "/webhook/chatwoot":
             return self.handle_webhook(parsed)
-        if path.startswith("/atlas-api/"):
-            return self.handle_atlas("POST", parsed)
-        if path.startswith("/api/"):
+        if path.startswith("/api/") or path.startswith("/atlas-api/"):
             return self.handle_api("POST", parsed)
         self.send_json(404, {"error": "Nao encontrado"})
 
@@ -2543,7 +3102,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_DELETE(self):
         parsed = urlparse(self.path)
-        if parsed.path.startswith("/api/"):
+        if parsed.path.startswith("/api/") or parsed.path.startswith("/atlas-api/"):
             return self.handle_api("DELETE", parsed)
         self.send_json(404, {"error": "Nao encontrado"})
 
@@ -2647,6 +3206,10 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/api/me" and method == "GET":
             return self.send_json(200, {"user": user_publico(user)})
+
+        # ---- Atlas de prospeccao (fazendas de Goias) ----
+        if path.startswith("/atlas-api/"):
+            return self.handle_atlas(method, path, qs, user, gestor)
 
         # ---- Heartbeat: mantem a presenca viva mesmo com um modal aberto ----
         if path == "/api/heartbeat" and method == "GET":
@@ -4279,6 +4842,12 @@ def _laco_backup():
 def main():
     load_db()
     recalcula_etapas()  # aplica as etapas personalizadas salvas nas configuracoes
+    try:
+        atlas_boot()    # descompacta/prepara o banco do Atlas de prospeccao
+    except Exception as e:
+        # o Atlas e um recurso SECUNDARIO: falha nele (disco cheio, gz ruim)
+        # nao pode derrubar o CRM inteiro — a Prospeccao responde 503
+        print("[atlas] AVISO: nao consegui preparar o Atlas (%s) — o CRM segue sem a Prospecção" % e)
     load_cidades()
     senha_admin = ensure_admin()
     ensure_webhook_token()

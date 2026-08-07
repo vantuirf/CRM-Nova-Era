@@ -172,6 +172,7 @@
 <script src="vendor/leaflet/leaflet.js"></script>
 <script>
 const fmt = n => n == null ? "–" : Number(n).toLocaleString("pt-BR");
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"})[c]);
 let munAtivo = "", terAtivo = "", pagina = 1, mapa, camadaPontos, municipiosCache = [], turnoMapa = 0;
 
 async function api(url, opts){ const r = await fetch(url, opts); return r.json(); }
@@ -198,7 +199,7 @@ async function carregarCulturas(){
   document.getElementById("tbCult").innerHTML = d.culturas.length
     ? d.culturas.map(c => `
         <tr class="linha" onclick="filtrarCultura(${c.id})" title="Clique para filtrar por ${c.nome}">
-          <td>🌿 ${c.nome}</td>
+          <td>🌿 ${esc(c.nome)}</td>
           <td style="text-align:right;color:#7a8794">${Math.round(c.fazendas/t*100)}% (${fmt(c.fazendas)})</td>
           <td style="text-align:right"><b>${fmt(c.area_ha)}</b> ha</td>
         </tr>`).join("")
@@ -214,14 +215,14 @@ async function carregarListaCulturas(){
   const d = await api("/atlas-api/culturas");   // lista geral, para o filtro
   document.getElementById("fCult").innerHTML =
     `<option value="">Todas as culturas</option>` +
-    d.culturas.map(c => `<option value="${c.id}">${c.nome}</option>`).join("");
+    d.culturas.map(c => `<option value="${c.id}">${esc(c.nome)}</option>`).join("");
 }
 
 async function carregarTerritorios(){
   const ts = await api("/atlas-api/territorios");
   document.getElementById("listaTer").innerHTML = ts.length ? ts.map(t =>
     `<div class="mun ter" data-tid="${t.id}">
-       <span>${t.nome}<br><small>${t.municipios} munic. · ${fmt(t.fazendas)} faz.</small></span>
+       <span>${esc(t.nome)}<br><small>${t.municipios} munic. · ${fmt(t.fazendas)} faz.</small></span>
        <small onclick="event.stopPropagation();excluirTer(${t.id})" style="cursor:pointer" title="Excluir">✕</small>
      </div>`).join("") : `<small style="color:#9aa6b2">Nenhum ainda.</small>`;
   document.querySelectorAll(".ter").forEach(el => el.onclick = () => {
@@ -254,7 +255,7 @@ document.addEventListener("click", e => {
       ${municipiosCache.filter(m=>m.fazendas>0).map(m=>`
         <label style="display:flex;gap:8px;padding:4px;font-size:14px;cursor:pointer">
           <input type="checkbox" value="${m.id}" data-nome="${m.nome.toLowerCase()}">
-          <span>${m.nome} <small style="color:#9aa6b2">${fmt(m.fazendas)}</small></span>
+          <span>${esc(m.nome)} <small style="color:#9aa6b2">${fmt(m.fazendas)}</small></span>
         </label>`).join("")}
     </div>
     <div class="form-inline"><button onclick="salvarTerritorio()">Criar território</button></div>`;
@@ -320,8 +321,8 @@ async function analisarPlanilha(){
 
   document.getElementById("impPasso2").innerHTML = `
     <div style="background:var(--cinza);padding:10px;border-radius:8px;margin:12px 0;font-size:13.5px">
-      <b>${d.arquivo}</b><br>${fmt(d.total_linhas)} linhas · ${d.colunas.length} colunas
-      ${d.abas.length>1 ? `<br>Abas: ${d.abas.join(", ")}` : ""}
+      <b>${esc(d.arquivo)}</b><br>${fmt(d.total_linhas)} linhas · ${d.colunas.length} colunas
+      ${d.abas.length>1 ? `<br>Abas: ${esc(d.abas.join(", "))}` : ""}
     </div>
     <h4 style="font-size:13px;text-transform:uppercase;color:#7a8794;margin:14px 0 8px">
       Diga qual coluna é o quê</h4>
@@ -330,7 +331,7 @@ async function analisarPlanilha(){
         <b>${rot}${obrig?' *':''}</b>
         <select id="map_${campo}" style="width:100%;padding:7px;border:1px solid var(--borda);border-radius:8px">
           <option value="">— não tenho essa coluna —</option>
-          ${d.colunas.map((c,i)=>`<option value="${i}" ${i===palpite(campo)?"selected":""}>${c||('coluna '+(i+1))}</option>`).join("")}
+          ${d.colunas.map((c,i)=>`<option value="${i}" ${i===palpite(campo)?"selected":""}>${esc(c)||('coluna '+(i+1))}</option>`).join("")}
         </select>
       </div>`).join("")}
     <div class="campo">
@@ -395,7 +396,7 @@ async function carregarMunicipios(){
   municipiosCache = ms;
   const alvo = document.getElementById("listaMun");
   alvo.innerHTML = ms.filter(m=>m.fazendas>0).map(m =>
-    `<div class="mun" data-id="${m.id}"><span>${m.nome}${m.uf!=='GO'?' ('+m.uf+')':''}</span><small>${fmt(m.fazendas)}</small></div>`).join("");
+    `<div class="mun" data-id="${m.id}"><span>${esc(m.nome)}${m.uf!=='GO'?' ('+esc(m.uf)+')':''}</span><small>${fmt(m.fazendas)}</small></div>`).join("");
   document.querySelectorAll(".mun:not(.ter)").forEach(el => el.onclick = () => {
     document.querySelectorAll(".mun").forEach(x=>x.classList.remove("ativo"));
     el.classList.add("ativo");
@@ -430,7 +431,7 @@ async function carregarFazendas(){
   const r = await api("/atlas-api/fazendas?"+ps);
   document.getElementById("tbFaz").innerHTML = r.fazendas.map(f => `
     <tr class="linha" onclick="abrirFazenda(${f.id})">
-      <td>${f.nome}</td><td>${f.municipio||"–"}</td>
+      <td>${esc(f.nome)}</td><td>${esc(f.municipio||"–")}</td>
       <td>${fmt(Math.round(f.area_total_ha))}</td>
       <td>${f.perimetro_km ? f.perimetro_km.toFixed(2) : "–"}</td>
       <td><span class="tag ${f.categoria}">${f.categoria.replace("_"," ")}</span></td>
@@ -471,13 +472,19 @@ async function carregarAreas(){
   clearTimeout(buscaAreas);
   mostrarAviso("carregando contornos…");
   const d = await api("/atlas-api/contornos?" + ps);
+  if (d.sem_contornos){
+    // esta instalação não tem os desenhos dos contornos: segue com os pontos
+    if (camadaPontos && !mapa.hasLayer(camadaPontos)) camadaPontos.addTo(mapa);
+    mostrarAviso("contornos não disponíveis nesta instalação — mostrando os pontos");
+    return;
+  }
   if (camadaAreas) camadaAreas.remove();
   camadaAreas = L.layerGroup(d.fazendas.map(f =>
     L.polygon(f.aneis.map(a => a.map(([x,y]) => [y,x])), {
       color: corDa(f.categoria), weight: 1.4, opacity: .95,
       fillColor: corDa(f.categoria), fillOpacity: .12
     }).bindPopup(
-      `<b>${f.nome}</b><br>${fmt(Math.round(f.area_total_ha))} ha` +
+      `<b>${esc(f.nome)}</b><br>${fmt(Math.round(f.area_total_ha))} ha` +
       `<br>Perímetro: ${f.perimetro_km ? f.perimetro_km.toFixed(2) : "–"} km` +
       `<br><a href="#" onclick="abrirFazenda(${f.id});return false">abrir ficha</a>`)
   )).addTo(mapa);
@@ -512,7 +519,7 @@ async function carregarMapa(){
                : p.categoria==="lead"    ? "#ffc400"
                : p.categoria==="descartada" ? "#ff5252" : "#40c4ff",
       color: "#ffffff", weight: 1.2, opacity: .9, fillOpacity: .8
-    }).bindPopup(`<b>${p.nome}</b><br>${fmt(p.area_total_ha)} ha`)
+    }).bindPopup(`<b>${esc(p.nome)}</b><br>${fmt(p.area_total_ha)} ha`)
       .on("click", ()=>abrirFazenda(p.id))
   ));
   camadaPontos.addTo(mapa);
@@ -547,11 +554,11 @@ async function abrirFazenda(id){
     <div class="catbtns">${cats.map(c =>
       `<button class="${f.categoria===c?'sel':''}" onclick="mudarCat(${f.id},'${c}')">${c.replace("_"," ")}</button>`).join("")}
     </div>
-    <div class="campo"><b>Município</b>${f.municipio||"–"} ${f.uf?("("+f.uf+")"):""}</div>
+    <div class="campo"><b>Município</b>${esc(f.municipio||"–")} ${f.uf?("("+esc(f.uf)+")"):""}</div>
     <div class="campo"><b>Área declarada no CAR</b>${fmt(Math.round(f.area_total_ha))} ha
       ${f.area_calculada_ha?`<small style="color:#7a8794"> · medida pelo contorno: ${fmt(Math.round(f.area_calculada_ha))} ha</small>`:""}</div>
     <div class="campo"><b>Perímetro</b>${f.perimetro_km ? f.perimetro_km.toFixed(2)+" km" : "–"}</div>
-    <div class="campo"><b>Situação do CAR</b>${f.status_car||"–"}</div>
+    <div class="campo"><b>Situação do CAR</b>${esc(f.status_car||"–")}</div>
     <div class="campo"><b>Coordenadas</b>${f.latitude?f.latitude.toFixed(5)+", "+f.longitude.toFixed(5):"–"}</div>
     <div class="form-inline">
       <button onclick="verNoMapa(${f.id})" style="background:var(--azul)">🛰️ Ver o contorno no mapa</button>
@@ -561,7 +568,7 @@ async function abrirFazenda(id){
 
     <div class="secao"><h4>Uso do solo (MapBiomas 2023)</h4>
       ${d.culturas.length ? `<table>${d.culturas.map(c=>`
-        <tr><td style="padding:5px 0">🌿 ${c.nome}</td>
+        <tr><td style="padding:5px 0">🌿 ${esc(c.nome)}</td>
             <td style="padding:5px 0;text-align:right"><b>${fmt(Math.round(c.area_ha))}</b> ha</td></tr>`).join("")}
         ${f.area_vegetacao_nativa_ha ? `<tr><td style="padding:5px 0;color:#7a8794">🌳 Vegetação nativa</td>
             <td style="padding:5px 0;text-align:right;color:#7a8794">${fmt(Math.round(f.area_vegetacao_nativa_ha))} ha</td></tr>`:""}
@@ -572,8 +579,8 @@ async function abrirFazenda(id){
 
     <div class="secao"><h4>Proprietários / contatos</h4>
       <div id="gPessoas">${d.pessoas.map(p=>`
-        <div class="pessoa"><b>${p.nome}</b> — ${p.relacao_fundiaria||""}<br>
-        ${p.telefone||""} ${p.email||""} ${p.documento?("· "+p.documento):""}</div>`).join("") || "<small>Nenhum contato ainda — cadastre abaixo.</small>"}
+        <div class="pessoa"><b>${esc(p.nome)}</b> — ${esc(p.relacao_fundiaria||"")}<br>
+        ${esc(p.telefone||"")} ${esc(p.email||"")} ${p.documento?("· "+esc(p.documento)):""}</div>`).join("") || "<small>Nenhum contato ainda — cadastre abaixo.</small>"}
       </div>
       <div class="form-inline">
         <input id="npNome" placeholder="Nome do proprietário">
@@ -585,7 +592,7 @@ async function abrirFazenda(id){
 
     <div class="secao"><h4>Registros da equipe</h4>
       <div id="gRegs">${d.registros.map(r=>`
-        <div class="registro">${r.texto}<br><small>${r.autor||""} · ${r.criado_em||""}</small></div>`).join("") || "<small>Nenhum registro ainda.</small>"}
+        <div class="registro">${esc(r.texto)}<br><small>${esc(r.autor||"")} · ${esc(r.criado_em||"")}</small></div>`).join("") || "<small>Nenhum registro ainda.</small>"}
       </div>
       <div class="form-inline">
         <textarea id="nrTexto" rows="2" placeholder="Ex: Visitei a fazenda, produtor pediu cotação de..."></textarea>
@@ -636,9 +643,9 @@ async function enviarParaFunil(id){
     <div style="background:var(--cinza);padding:12px;border-radius:8px;margin-top:8px">
       <b style="font-size:13px">Dados do contato para abrir o lead</b>
       <div class="form-inline" style="margin-top:8px">
-        <input id="fnNome"  placeholder="Nome do produtor / empresa *" value="${(c.nome||"").replace(/"/g,'&quot;')}">
-        <input id="fnTel"   placeholder="Telefone / WhatsApp *" value="${c.telefone||""}">
-        <input id="fnEmail" placeholder="E-mail *" value="${c.email||""}">
+        <input id="fnNome"  placeholder="Nome do produtor / empresa *" value="${esc(c.nome||"")}">
+        <input id="fnTel"   placeholder="Telefone / WhatsApp *" value="${esc(c.telefone||"")}">
+        <input id="fnEmail" placeholder="E-mail *" value="${esc(c.email||"")}">
         <button onclick="confirmarFunil(${id})">Criar lead no meu funil</button>
       </div>
       <div id="fnStatus" style="font-size:13px;margin-top:8px"></div>
@@ -661,22 +668,29 @@ async function confirmarFunil(id){
       .map(c => c.nome + " " + fmt(Math.round(c.area_ha)) + " ha").join(", ");
   st.style.color = "#7a8794"; st.textContent = "Enviando…";
 
-  const r = await fetch("/api/leads", {method:"POST", headers:{"Content-Type":"application/json"},
-    body: JSON.stringify({
-      nome, telefone: tel, email,
-      cidade: f.municipio || "", uf: f.uf || "GO",
-      area: Math.round(f.area_total_ha || 0),
-      source: "prospeccao-atlas",
-      observacoes:
-        "Prospecção pelo mapa\n" +
-        "Fazenda: " + f.nome + "\n" +
-        "CAR: " + (f.codigo_car || "-") + "\n" +
-        "Área: " + fmt(Math.round(f.area_total_ha||0)) + " ha · Perímetro: " +
-          (f.perimetro_km ? f.perimetro_km.toFixed(2) : "-") + " km\n" +
-        (culturas ? "Culturas: " + culturas + "\n" : "") +
-        "Coordenadas: " + (f.latitude ? f.latitude.toFixed(5) + ", " + f.longitude.toFixed(5) : "-")
-    })});
-  const res = await r.json().catch(()=>({}));
+  const corpo = {
+    nome, telefone: tel, email,
+    regiao: f.municipio ? (f.municipio + " - " + (f.uf || "GO")) : "",
+    area_cultivada: f.area_total_ha ? (Math.round(f.area_total_ha) + " ha") : "",
+    observacoes:
+      "Prospecção pelo mapa\n" +
+      "Fazenda: " + f.nome + "\n" +
+      "CAR: " + (f.codigo_car || "-") + "\n" +
+      "Área: " + fmt(Math.round(f.area_total_ha||0)) + " ha · Perímetro: " +
+        (f.perimetro_km ? f.perimetro_km.toFixed(2) : "-") + " km\n" +
+      (culturas ? "Culturas: " + culturas + "\n" : "") +
+      "Coordenadas: " + (f.latitude ? f.latitude.toFixed(5) + ", " + f.longitude.toFixed(5) : "-")
+  };
+  let r = await fetch("/api/leads", {method:"POST", headers:{"Content-Type":"application/json"},
+    body: JSON.stringify(corpo)});
+  let res = await r.json().catch(()=>({}));
+  if (!r.ok && corpo.regiao && /cidade/i.test(res.error || "")){
+    // município fora da lista do CRM (ex.: divisa TO/MG): manda sem a região
+    delete corpo.regiao;
+    r = await fetch("/api/leads", {method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify(corpo)});
+    res = await r.json().catch(()=>({}));
+  }
   if (!r.ok){
     st.style.color = "#b3261e";
     st.textContent = res.error || "Não consegui criar o lead.";

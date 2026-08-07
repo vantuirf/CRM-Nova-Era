@@ -4063,6 +4063,8 @@ function applyRoleUI() {
   $('#btnAlertas').hidden = !gestor;
   $('#btnEtapas').hidden = !gestor;
   $('#btnUsers').hidden = me.papel !== 'admin';
+  // Prospecção (Atlas): gestor e vendedores — venda é trabalho deles
+  $('#btnProspeccao').hidden = !(gestor || me.papel === 'vendedor');
   // botão "Recuperação" só para quem tem acesso liberado (admin/gerente sempre)
   $('#escRecup').hidden = !me.pode_recuperacao;
   // aviso de senha padrão (só para o admin que ainda não trocou)
