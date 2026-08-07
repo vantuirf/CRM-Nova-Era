@@ -35,6 +35,9 @@ import urllib.error
 # Configuracao
 # ---------------------------------------------------------------------------
 PORT = int(os.environ.get("PORT", "3000"))
+# Atlas de prospecção: serviço local com o mapa das fazendas (ver pasta atlas-agro).
+# O CRM repassa /atlas-api/* para ele, sempre exigindo sessão.
+ATLAS_URL = os.environ.get("ATLAS_URL", "http://127.0.0.1:8765")
 
 # Token do webhook (protege o endpoint). Prioridade: variavel de ambiente
 # WEBHOOK_TOKEN; senao, um token aleatorio persistido no banco (settings) na
@@ -388,6 +391,15 @@ def precisa_retorno(lead, cadencia_dias):
     return heat_nivel(lead) == "quente"    # banda do meio: so o quente (🔥) dispara
 
 
+def tarefa_cobrando(lead):
+    """True se ha tarefa ABERTA com prazo para hoje ou ja vencido (dia BRT)."""
+    hoje = dia_brt(now_iso())
+    for t in (lead.get("tarefas") or []):
+        if not t.get("feita") and t.get("prazo") and str(t["prazo"])[:10] <= hoje:
+            return True
+    return False
+
+
 def cadencia_dias_cfg():
     """Prazo (dias) do alerta de retorno, configuravel; padrao 2, limites 1..30."""
     try:
@@ -493,6 +505,8 @@ def load_db():
                     l["historico"] = []
                 l.setdefault("aguardando_resposta", None)
                 l.setdefault("cliente_respondeu", None)
+                if not isinstance(l.get("tarefas"), list):
+                    l["tarefas"] = []
                 if not isinstance(l.get("chatwoot_msgs_vistas"), list):
                     l["chatwoot_msgs_vistas"] = []
                 # marcadores antigos eram ints (uma instancia so): viram o
@@ -577,6 +591,8 @@ def make_lead(partial=None):
         "ganho_em": None,        # data em que o negocio foi GANHO (fixa; p/ relatorio)
         "perdido_em": None,      # data em que o negocio foi PERDIDO (fixa; p/ relatorio)
         "desistiu_em": None,     # data em que o cliente DESISTIU da compra (fixa)
+        "tarefas": [],     # tarefas do cliente: {id, texto, prazo, criada_por,
+                           # criada_em, feita, feita_em, feita_por}
         "aguardando_resposta": None,  # ISO do contato por WhatsApp que ainda espera
                                       # o vendedor REGISTRAR o que o cliente respondeu
         "cliente_respondeu": None,    # ISO da ultima mensagem RECEBIDA do cliente que
@@ -2453,12 +2469,56 @@ class Handler(BaseHTTPRequestHandler):
             raise ValueError("esperado um objeto JSON")
         return data
 
+    # -- Atlas de prospecção (repassa para o serviço local do mapa) --
+    def handle_atlas(self, method, parsed):
+        """A tela de Prospecção consulta o Atlas (mapa de fazendas), que roda
+        como servico local na porta ATLAS_PORT. Aqui so repassamos o pedido,
+        exigindo sessao do CRM — o Atlas nunca fica exposto sozinho."""
+        user = usuario_da_sessao(self._cookie("sessao"))
+        if not user:
+            return self.send_json(401, {"error": "Faca login no CRM"})
+
+        destino = "%s/api/%s" % (ATLAS_URL, parsed.path[len("/atlas-api/"):])
+        if parsed.query:
+            destino += "?" + parsed.query
+        corpo = None
+        if method in ("POST", "PATCH", "PUT"):
+            tam = int(self.headers.get("Content-Length") or 0)
+            corpo = self.rfile.read(tam) if tam > 0 else b"{}"
+
+        req = urllib.request.Request(destino, data=corpo, method=method)
+        if corpo is not None:
+            req.add_header("Content-Type", self.headers.get("Content-Type") or "application/json")
+        req.add_header("X-Usuario", user.get("nome") or "")
+        try:
+            with urllib.request.urlopen(req, timeout=120) as r:
+                dados, status = r.read(), r.status
+                ctype = r.headers.get("Content-Type", "application/json")
+        except urllib.error.HTTPError as e:
+            dados, status, ctype = e.read(), e.code, "application/json"
+        except Exception:
+            return self.send_json(503, {"error": "O mapa de prospecção está fora do ar. "
+                                                 "Inicie o Atlas (atlas-agro/iniciar.command)."})
+        self.send_response(status)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(dados)))
+        self.headers_seguranca()
+        self.end_headers()
+        self.wfile.write(dados)
+
     # -- roteamento --
     def do_GET(self):
         parsed = urlparse(self.path)
         path = parsed.path
+        if path.startswith("/atlas-api/"):
+            return self.handle_atlas("GET", parsed)
         if path.startswith("/api/"):
             return self.handle_api("GET", parsed)
+        if path == "/prospeccao.html" and not usuario_da_sessao(self._cookie("sessao")):
+            self.send_response(302)
+            self.send_header("Location", "/login.html")
+            self.end_headers()
+            return
         return self.serve_static(path)
 
     def do_POST(self):
@@ -2466,6 +2526,8 @@ class Handler(BaseHTTPRequestHandler):
         path = parsed.path
         if path == "/webhook/chatwoot":
             return self.handle_webhook(parsed)
+        if path.startswith("/atlas-api/"):
+            return self.handle_atlas("POST", parsed)
         if path.startswith("/api/"):
             return self.handle_api("POST", parsed)
         self.send_json(404, {"error": "Nao encontrado"})
@@ -2792,10 +2854,16 @@ class Handler(BaseHTTPRequestHandler):
                 prestadores = sum(1 for l in visiveis if l.get("tipo") == "prestador")
                 pecuaristas = sum(1 for l in visiveis if l.get("tipo") == "pecuarista")
                 cursos = sum(1 for l in visiveis if l.get("tipo") == "curso")
-                aguardando = sum(1 for l in visiveis if l.get("aguardando_resposta"))
-                respondeu = sum(1 for l in visiveis if l.get("cliente_respondeu"))
+                # Cada lead conta UMA vez no 🔔, na mesma prioridade dos cards:
+                # respondeu > tarefa vencendo > registrar resposta > retorno
                 _cad = cadencia_dias_cfg()
-                retornos = sum(1 for l in visiveis if precisa_retorno(l, _cad))
+                respondeu = sum(1 for l in visiveis if l.get("cliente_respondeu"))
+                tarefas_cobrando = sum(1 for l in visiveis if tarefa_cobrando(l)
+                                       and not l.get("cliente_respondeu"))
+                aguardando = sum(1 for l in visiveis if l.get("aguardando_resposta")
+                                 and not tarefa_cobrando(l))
+                retornos = sum(1 for l in visiveis
+                               if precisa_retorno(l, _cad) and not tarefa_cobrando(l))
                 # cidades presentes nos leads visiveis (para o filtro de cidade)
                 cidades = sorted({str(l.get("regiao") or "").strip()
                                   for l in visiveis if str(l.get("regiao") or "").strip()})
@@ -2809,7 +2877,8 @@ class Handler(BaseHTTPRequestHandler):
                     "aguardando_resposta": aguardando,
                     "cliente_respondeu": respondeu,
                     "retornos": retornos,
-                    "alertas": aguardando + retornos + respondeu,
+                    "tarefas_cobrando": tarefas_cobrando,
+                    "alertas": aguardando + retornos + respondeu + tarefas_cobrando,
                     "atuais_total": n_atuais,
                     "recuperacao_total": n_recuperacao,
                     "servicos_total": n_servicos,
@@ -3595,6 +3664,60 @@ class Handler(BaseHTTPRequestHandler):
                     return self.send_json(200, {"ok": True, "total": len(lead["visitas"])})
 
         # ---- Nota manual na linha do tempo (vendedor/gerente escrevem updates) ----
+        # ---- Tarefas do cliente (criar / concluir-reabrir / excluir) ----
+        mtar = re.match(r"^/api/leads/([^/]+)/tarefas(?:/([^/]+))?$", path)
+        if mtar and method in ("POST", "PATCH", "DELETE"):
+            lead_id, tarefa_id = mtar.group(1), mtar.group(2)
+            try:
+                body = self.read_body()
+            except Exception:
+                return self.send_json(400, {"error": "Corpo invalido"})
+            with _lock:
+                lead = next((l for l in _db["leads"] if l["id"] == lead_id), None)
+                if not lead or not pode_ver_lead(user, lead):
+                    return self.send_json(404, {"error": "Lead nao encontrado"})
+                tarefas = lead.setdefault("tarefas", [])
+                if method == "POST" and not tarefa_id:
+                    texto = str(body.get("texto") or "").strip()[:300]
+                    if not texto:
+                        return self.send_json(400, {"error": "Escreva a tarefa antes de salvar"})
+                    prazo = str(body.get("prazo") or "").strip()[:16]
+                    if prazo and not re.match(r"^\d{4}-\d{2}-\d{2}", prazo):
+                        return self.send_json(400, {"error": "Prazo inválido"})
+                    if len(tarefas) >= 100:
+                        return self.send_json(400, {"error": "Este cliente já tem 100 tarefas — conclua ou exclua antigas"})
+                    t = {"id": secrets.token_hex(6), "texto": texto, "prazo": prazo,
+                         "criada_por": user["nome"], "criada_em": now_iso(),
+                         "feita": False, "feita_em": None, "feita_por": ""}
+                    tarefas.append(t)
+                    registra_hist(lead, user["nome"],
+                                  ['📋 Tarefa criada: "%s"%s' % (texto, (" (até %s)" % prazo[:10]) if prazo else "")],
+                                  papel=user["papel"])
+                    lead["updated_at"] = now_iso()
+                    save_db()
+                    return self.send_json(201, {"tarefa": t, "tarefas": tarefas})
+                t = next((x for x in tarefas if x.get("id") == tarefa_id), None)
+                if not t:
+                    return self.send_json(404, {"error": "Tarefa não encontrada"})
+                if method == "PATCH":
+                    if "feita" in body:
+                        t["feita"] = bool(body["feita"])
+                        t["feita_em"] = now_iso() if t["feita"] else None
+                        t["feita_por"] = user["nome"] if t["feita"] else ""
+                        if t["feita"]:
+                            registra_hist(lead, user["nome"],
+                                          ['✅ Tarefa concluída: "%s"' % t["texto"]], papel=user["papel"])
+                    lead["updated_at"] = now_iso()
+                    save_db()
+                    return self.send_json(200, {"tarefa": t, "tarefas": tarefas})
+                # DELETE
+                lead["tarefas"] = [x for x in tarefas if x.get("id") != tarefa_id]
+                registra_hist(lead, user["nome"],
+                              ['🗑️ Tarefa excluída: "%s"' % t["texto"]], papel=user["papel"])
+                lead["updated_at"] = now_iso()
+                save_db()
+                return self.send_json(200, {"ok": True, "tarefas": lead["tarefas"]})
+
         mn = re.match(r"^/api/leads/([^/]+)/notas$", path)
         if mn and method == "POST":
             lead_id = mn.group(1)

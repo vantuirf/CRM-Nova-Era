@@ -1,0 +1,769 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Prospecção — CRM Nova Era</title>
+<link rel="stylesheet" href="vendor/leaflet/leaflet.css">
+<style>
+  :root{
+    --verde:#2ecc71; --verde-esc:#0e7a43; --azul:#12325c;
+    --cinza:#f4f6f8; --borda:#e3e8ee; --texto:#26323d;
+  }
+  *{box-sizing:border-box;margin:0;padding:0;font-family:-apple-system,'Segoe UI',Roboto,sans-serif}
+  body{background:var(--cinza);color:var(--texto)}
+  header{background:#fff;border-bottom:1px solid var(--borda);padding:10px 20px;
+         display:flex;align-items:center;gap:14px;position:sticky;top:0;z-index:1000}
+  header h1{font-size:20px;color:var(--azul);letter-spacing:.5px}
+  header .voltar{color:var(--azul);text-decoration:none;font-weight:600;font-size:14px;
+                 padding:6px 10px;border:1px solid var(--borda);border-radius:8px}
+  header .voltar:hover{background:var(--cinza)}
+  #usuarioLogado{margin-left:auto;font-size:13px;color:#7a8794}
+  header h1 span{color:var(--verde-esc)}
+  header small{color:#7a8794}
+  .layout{display:grid;grid-template-columns:290px 1fr;min-height:calc(100vh - 53px)}
+  aside{background:#fff;border-right:1px solid var(--borda);padding:14px;overflow-y:auto;max-height:calc(100vh - 53px)}
+  aside h2{font-size:13px;text-transform:uppercase;color:#7a8794;margin-bottom:8px}
+  #buscaMun{width:100%;padding:8px 10px;border:1px solid var(--borda);border-radius:8px;margin-bottom:10px}
+  .mun{padding:7px 10px;border-radius:8px;cursor:pointer;display:flex;justify-content:space-between;font-size:14px}
+  .mun:hover{background:var(--cinza)}
+  .mun.ativo{background:#e8f8ef;color:var(--verde-esc);font-weight:600}
+  .mun small{color:#9aa6b2}
+  main{padding:18px 22px;overflow-y:auto;max-height:calc(100vh - 53px)}
+  .kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px;margin-bottom:16px}
+  .kpi{background:#fff;border:1px solid var(--borda);border-radius:12px;padding:14px}
+  .kpi b{font-size:22px;color:var(--azul);display:block}
+  .kpi span{font-size:12.5px;color:#7a8794}
+  .paineis{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:16px}
+  @media(max-width:1000px){.paineis{grid-template-columns:1fr}}
+  .painel{background:#fff;border:1px solid var(--borda);border-radius:12px;overflow:hidden}
+  .painel h3{font-size:14px;padding:12px 14px;border-bottom:1px solid var(--borda)}
+  #mapa{height:440px}
+  .filtros{display:flex;gap:8px;padding:12px 14px;flex-wrap:wrap}
+  .filtros input,.filtros select{padding:8px 10px;border:1px solid var(--borda);border-radius:8px;font-size:14px}
+  .filtros input{flex:1;min-width:160px}
+  table{width:100%;border-collapse:collapse;font-size:13.5px}
+  th,td{text-align:left;padding:9px 14px;border-top:1px solid var(--borda)}
+  th{color:#7a8794;font-weight:600;font-size:12px;text-transform:uppercase}
+  tr.linha:hover{background:#f0faf4;cursor:pointer}
+  .tag{padding:3px 9px;border-radius:20px;font-size:12px;font-weight:600}
+  .tag.cliente{background:#e8f8ef;color:var(--verde-esc)}
+  .tag.lead{background:#fff6e0;color:#9a6b00}
+  .tag.descartada{background:#ffe9e9;color:#b3261e}
+  .tag.sem_categoria{background:#eef1f4;color:#7a8794}
+  .paginacao{display:flex;gap:6px;padding:12px 14px;align-items:center;font-size:13px}
+  .paginacao button{padding:6px 12px;border:1px solid var(--borda);background:#fff;border-radius:8px;cursor:pointer}
+  .paginacao button:disabled{opacity:.4;cursor:default}
+  /* gaveta de detalhe */
+  #gaveta{position:fixed;top:0;right:-520px;width:500px;max-width:95vw;height:100vh;background:#fff;
+          box-shadow:-8px 0 30px rgba(0,0,0,.12);transition:right .25s;z-index:2000;overflow-y:auto}
+  #gaveta.aberta{right:0}
+  #gaveta .cab{padding:16px;border-bottom:1px solid var(--borda);display:flex;justify-content:space-between;align-items:start;gap:10px}
+  #gaveta h2{font-size:17px;color:var(--azul)}
+  #gaveta .corpo{padding:16px}
+  #gaveta .fechar{border:none;background:none;font-size:22px;cursor:pointer;color:#7a8794}
+  .campo{margin-bottom:10px;font-size:14px}
+  .campo b{display:block;font-size:12px;color:#7a8794;text-transform:uppercase}
+  .catbtns{display:flex;gap:6px;margin:10px 0;flex-wrap:wrap}
+  .catbtns button{padding:7px 12px;border-radius:20px;border:1px solid var(--borda);background:#fff;cursor:pointer;font-size:13px}
+  .catbtns button.sel{background:var(--verde);border-color:var(--verde);color:#fff;font-weight:600}
+  .secao{margin-top:18px}
+  .secao h4{font-size:13px;text-transform:uppercase;color:#7a8794;margin-bottom:8px}
+  .pessoa,.registro{background:var(--cinza);border-radius:8px;padding:10px;margin-bottom:8px;font-size:13.5px}
+  .registro small{color:#9aa6b2}
+  .form-inline{display:grid;gap:6px;margin-top:8px}
+  .form-inline input,.form-inline textarea{padding:8px;border:1px solid var(--borda);border-radius:8px;font-size:13.5px}
+  .form-inline button{padding:8px;border:none;border-radius:8px;background:var(--verde);color:#fff;font-weight:600;cursor:pointer}
+  #fundo{position:fixed;inset:0;background:rgba(0,0,0,.25);display:none;z-index:1500}
+  #fundo.on{display:block}
+</style>
+</head>
+<body>
+<header>
+  <a href="/" class="voltar" title="Voltar para o funil">← CRM</a>
+  <h1>PROSPECÇÃO <span>NOVA ERA</span></h1>
+  <small id="subtitulo">Goiás — carregando…</small>
+  <span id="usuarioLogado"></span>
+</header>
+
+<div class="layout">
+  <aside>
+    <h2>Territórios</h2>
+    <div id="listaTer"></div>
+    <button id="btnNovoTer" style="width:100%;padding:8px;margin:6px 0 8px;border:1px dashed var(--verde);
+            background:#f2fbf6;color:var(--verde-esc);border-radius:8px;cursor:pointer;font-weight:600">
+      + Criar território (ex: Corredor da Ferrovia)</button>
+    <button id="btnImportar" style="width:100%;padding:8px;margin:0 0 16px;border:1px dashed var(--azul);
+            background:#f2f6fb;color:var(--azul);border-radius:8px;cursor:pointer;font-weight:600">
+      📄 Importar planilha de clientes</button>
+
+    <h2>Municípios</h2>
+    <input id="buscaMun" placeholder="Buscar município…">
+    <div class="mun ativo" data-id="" id="munTodos"><span>Todos (Goiás)</span></div>
+    <div id="listaMun"></div>
+  </aside>
+
+  <main>
+    <div class="kpis">
+      <div class="kpi"><b id="kFaz">–</b><span>Fazendas</span></div>
+      <div class="kpi"><b id="kArea">–</b><span>Hectares</span></div>
+      <div class="kpi"><b id="kMedia">–</b><span>Tamanho médio (ha)</span></div>
+      <div class="kpi"><b id="kCli">–</b><span>Clientes / Leads</span></div>
+    </div>
+
+    <div class="paineis">
+      <div class="painel"><h3>Mapa (maiores fazendas)</h3><div id="mapa"></div></div>
+      <div class="painel">
+        <h3>Fazendas por cultura <small style="color:#9aa6b2;font-weight:400">(MapBiomas 2023)</small></h3>
+        <table><tbody id="tbCult"></tbody></table>
+      </div>
+      <div class="painel">
+        <h3>Fazendas</h3>
+        <div class="filtros">
+          <input id="busca" placeholder="Buscar por nome ou código CAR…">
+          <select id="fCat">
+            <option value="">Todas as categorias</option>
+            <option value="cliente">Clientes</option>
+            <option value="lead">Leads</option>
+            <option value="descartada">Descartadas</option>
+            <option value="sem_categoria">Sem categoria</option>
+          </select>
+          <select id="fCult" title="Mostrar só fazendas que têm esta cultura">
+            <option value="">Todas as culturas</option>
+          </select>
+          <select id="fCultMin" title="Área mínima plantada dessa cultura">
+            <option value="">Qualquer área plantada</option>
+            <option value="50">Cultura com 50+ ha</option>
+            <option value="100">Cultura com 100+ ha</option>
+            <option value="300">Cultura com 300+ ha</option>
+            <option value="500">Cultura com 500+ ha</option>
+            <option value="1000">Cultura com 1.000+ ha</option>
+          </select>
+          <select id="fArea" title="Tamanho mínimo da fazenda">
+            <option value="">Qualquer tamanho de fazenda</option>
+            <option value="100">A partir de 100 ha</option>
+            <option value="200">A partir de 200 ha</option>
+            <option value="500">A partir de 500 ha</option>
+            <option value="1000">A partir de 1.000 ha</option>
+            <option value="2000">A partir de 2.000 ha</option>
+          </select>
+        </div>
+        <table>
+          <thead><tr><th>Fazenda</th><th>Município</th><th>Área (ha)</th><th>Perímetro (km)</th><th>Categoria</th></tr></thead>
+          <tbody id="tbFaz"></tbody>
+        </table>
+        <div class="paginacao">
+          <button id="pgAnt">‹</button><span id="pgInfo"></span><button id="pgProx">›</button>
+        </div>
+      </div>
+    </div>
+  </main>
+</div>
+
+<div id="fundo"></div>
+<div id="gaveta">
+  <div class="cab">
+    <div><h2 id="gNome"></h2><small id="gCar" style="color:#7a8794"></small></div>
+    <button class="fechar" onclick="fecharGaveta()">×</button>
+  </div>
+  <div class="corpo" id="gCorpo"></div>
+</div>
+
+<script src="vendor/leaflet/leaflet.js"></script>
+<script>
+const fmt = n => n == null ? "–" : Number(n).toLocaleString("pt-BR");
+let munAtivo = "", terAtivo = "", pagina = 1, mapa, camadaPontos, municipiosCache = [], turnoMapa = 0;
+
+async function api(url, opts){ const r = await fetch(url, opts); return r.json(); }
+
+/* monta os parâmetros comuns (município OU território, + área mínima) */
+function escopo(extra){
+  const ps = new URLSearchParams(extra || {});
+  if (terAtivo) ps.set("territorio_id", terAtivo);
+  else if (munAtivo) ps.set("municipio_id", munAtivo);
+  const a = document.getElementById("fArea").value;
+  if (a) ps.set("area_min", a);
+  const cu = document.getElementById("fCult").value;
+  if (cu){
+    ps.set("cultura", cu);
+    const cm = document.getElementById("fCultMin").value;
+    if (cm) ps.set("cultura_min", cm);
+  }
+  return ps;
+}
+
+async function carregarCulturas(){
+  const d = await api("/atlas-api/culturas?" + escopo());
+  const t = d.total_fazendas || 1;
+  document.getElementById("tbCult").innerHTML = d.culturas.length
+    ? d.culturas.map(c => `
+        <tr class="linha" onclick="filtrarCultura(${c.id})" title="Clique para filtrar por ${c.nome}">
+          <td>🌿 ${c.nome}</td>
+          <td style="text-align:right;color:#7a8794">${Math.round(c.fazendas/t*100)}% (${fmt(c.fazendas)})</td>
+          <td style="text-align:right"><b>${fmt(c.area_ha)}</b> ha</td>
+        </tr>`).join("")
+    : `<tr><td style="color:#9aa6b2">Sem dados de cultura neste recorte.</td></tr>`;
+}
+function filtrarCultura(id){
+  const sel = document.getElementById("fCult");
+  sel.value = (sel.value === String(id)) ? "" : String(id);   // clicar de novo desmarca
+  pagina = 1; atualizarTudo();
+}
+
+async function carregarListaCulturas(){
+  const d = await api("/atlas-api/culturas");   // lista geral, para o filtro
+  document.getElementById("fCult").innerHTML =
+    `<option value="">Todas as culturas</option>` +
+    d.culturas.map(c => `<option value="${c.id}">${c.nome}</option>`).join("");
+}
+
+async function carregarTerritorios(){
+  const ts = await api("/atlas-api/territorios");
+  document.getElementById("listaTer").innerHTML = ts.length ? ts.map(t =>
+    `<div class="mun ter" data-tid="${t.id}">
+       <span>${t.nome}<br><small>${t.municipios} munic. · ${fmt(t.fazendas)} faz.</small></span>
+       <small onclick="event.stopPropagation();excluirTer(${t.id})" style="cursor:pointer" title="Excluir">✕</small>
+     </div>`).join("") : `<small style="color:#9aa6b2">Nenhum ainda.</small>`;
+  document.querySelectorAll(".ter").forEach(el => el.onclick = () => {
+    document.querySelectorAll(".mun").forEach(x=>x.classList.remove("ativo"));
+    el.classList.add("ativo");
+    terAtivo = el.dataset.tid; munAtivo = ""; pagina = 1;
+    document.getElementById("subtitulo").textContent = el.querySelector("span").childNodes[0].textContent;
+    atualizarTudo();
+  });
+}
+async function excluirTer(id){
+  if(!confirm("Excluir este território? As fazendas continuam no banco.")) return;
+  await fetch("/atlas-api/territorios/"+id, {method:"DELETE"});
+  if (terAtivo == id){ terAtivo = ""; document.getElementById("munTodos").classList.add("ativo"); atualizarTudo(); }
+  carregarTerritorios();
+}
+
+/* criação de território: escolher vários municípios (ex: os cortados pela ferrovia) */
+document.addEventListener("click", e => {
+  if (e.target.id !== "btnNovoTer") return;
+  const cx = document.getElementById("gCorpo");
+  document.getElementById("gNome").textContent = "Novo território";
+  document.getElementById("gCar").textContent = "Marque os municípios que fazem parte";
+  cx.innerHTML = `
+    <div class="form-inline">
+      <input id="ntNome" placeholder="Nome do território (ex: Corredor da Ferrovia)">
+      <input id="ntBusca" placeholder="Filtrar municípios…">
+    </div>
+    <div id="ntLista" style="max-height:52vh;overflow:auto;margin:10px 0;border:1px solid var(--borda);border-radius:8px;padding:8px">
+      ${municipiosCache.filter(m=>m.fazendas>0).map(m=>`
+        <label style="display:flex;gap:8px;padding:4px;font-size:14px;cursor:pointer">
+          <input type="checkbox" value="${m.id}" data-nome="${m.nome.toLowerCase()}">
+          <span>${m.nome} <small style="color:#9aa6b2">${fmt(m.fazendas)}</small></span>
+        </label>`).join("")}
+    </div>
+    <div class="form-inline"><button onclick="salvarTerritorio()">Criar território</button></div>`;
+  document.getElementById("ntBusca").oninput = ev => {
+    const q = ev.target.value.toLowerCase();
+    cx.querySelectorAll("#ntLista label").forEach(l =>
+      l.style.display = l.querySelector("input").dataset.nome.includes(q) ? "flex" : "none");
+  };
+  document.getElementById("gaveta").classList.add("aberta");
+  document.getElementById("fundo").classList.add("on");
+});
+/* ---------- importação de planilhas (.xlsx / .csv) ---------- */
+const CAMPOS_IMPORT = [
+  ["nome",       "Nome do cliente / empresa", true],
+  ["telefone",   "Telefone / WhatsApp", false],
+  ["email",      "E-mail", false],
+  ["documento",  "CPF / CNPJ", false],
+  ["codigo_car", "Código do CAR", false],
+  ["fazenda",    "Nome da fazenda", false],
+  ["municipio",  "Município", false],
+  ["latitude",   "Latitude", false],
+  ["longitude",  "Longitude", false],
+  ["relacao",    "Relação (proprietário/arrendatário)", false],
+];
+let importAtual = null;
+
+document.addEventListener("click", e => {
+  if (e.target.id !== "btnImportar") return;
+  document.getElementById("gNome").textContent = "Importar planilha";
+  document.getElementById("gCar").textContent = "Aceita .xlsx ou .csv";
+  document.getElementById("gCorpo").innerHTML = `
+    <div class="form-inline">
+      <input type="file" id="impArquivo" accept=".xlsx,.xlsm,.csv"
+             style="padding:14px;border:2px dashed var(--borda);background:var(--cinza)">
+      <button onclick="analisarPlanilha()">Ler o arquivo</button>
+    </div>
+    <div id="impPasso2"></div>`;
+  document.getElementById("gaveta").classList.add("aberta");
+  document.getElementById("fundo").classList.add("on");
+});
+
+async function analisarPlanilha(){
+  const inp = document.getElementById("impArquivo");
+  if (!inp.files.length) return alert("Escolha um arquivo primeiro.");
+  const fd = new FormData();
+  fd.append("arquivo", inp.files[0]);
+  document.getElementById("impPasso2").innerHTML = "<p style='padding:12px'>Lendo o arquivo…</p>";
+  const r = await fetch("/atlas-api/importar/analisar", {method:"POST", body: fd});
+  const d = await r.json();
+  if (d.erro) return document.getElementById("impPasso2").innerHTML =
+    `<p style="padding:12px;color:#b3261e">${d.erro}</p>`;
+  importAtual = d;
+
+  // tenta adivinhar a coluna certa pelo nome do cabeçalho
+  const palpite = (campo) => {
+    const chaves = {nome:["nome","cliente","empresa","proprietar","razao"], telefone:["telefone","fone","whats","celular"],
+      email:["email","e-mail"], documento:["cpf","cnpj","documento","doc"], codigo_car:["car","cod_imovel"],
+      fazenda:["fazenda","imovel","propriedade"], municipio:["municipio","cidade"],
+      latitude:["latitude","lat"], longitude:["longitude","long","lon"], relacao:["relacao","vinculo"]};
+    const idx = d.colunas.findIndex(c => (chaves[campo]||[]).some(k => String(c).toLowerCase().includes(k)));
+    return idx;
+  };
+
+  document.getElementById("impPasso2").innerHTML = `
+    <div style="background:var(--cinza);padding:10px;border-radius:8px;margin:12px 0;font-size:13.5px">
+      <b>${d.arquivo}</b><br>${fmt(d.total_linhas)} linhas · ${d.colunas.length} colunas
+      ${d.abas.length>1 ? `<br>Abas: ${d.abas.join(", ")}` : ""}
+    </div>
+    <h4 style="font-size:13px;text-transform:uppercase;color:#7a8794;margin:14px 0 8px">
+      Diga qual coluna é o quê</h4>
+    ${CAMPOS_IMPORT.map(([campo,rot,obrig]) => `
+      <div class="campo">
+        <b>${rot}${obrig?' *':''}</b>
+        <select id="map_${campo}" style="width:100%;padding:7px;border:1px solid var(--borda);border-radius:8px">
+          <option value="">— não tenho essa coluna —</option>
+          ${d.colunas.map((c,i)=>`<option value="${i}" ${i===palpite(campo)?"selected":""}>${c||('coluna '+(i+1))}</option>`).join("")}
+        </select>
+      </div>`).join("")}
+    <div class="campo">
+      <b>Marcar as fazendas encontradas como</b>
+      <select id="impCategoria" style="width:100%;padding:7px;border:1px solid var(--borda);border-radius:8px">
+        <option value="cliente">Clientes</option>
+        <option value="lead">Leads</option>
+        <option value="">Não mudar a categoria</option>
+      </select>
+    </div>
+    <div class="campo"><b>De onde veio (fica no histórico)</b>
+      <input id="impOrigem" placeholder="ex: Carteira de clientes 2026"
+             style="width:100%;padding:7px;border:1px solid var(--borda);border-radius:8px"></div>
+    <div class="form-inline"><button onclick="executarImportacao()">Importar ${fmt(d.total_linhas)} linhas</button></div>
+    <p style="font-size:12px;color:#9aa6b2;margin-top:10px">
+      Como ele acha a fazenda: primeiro pelo código do CAR; se não tiver, pela coordenada
+      (verifica se o ponto cai dentro do contorno); por último pelo nome da fazenda + município.</p>`;
+}
+
+async function executarImportacao(){
+  if (!importAtual) return;
+  const mapa = {};
+  for (const [campo] of CAMPOS_IMPORT){
+    const v = document.getElementById("map_"+campo).value;
+    if (v !== "") mapa[campo] = v;
+  }
+  if (mapa.nome === undefined) return alert("Escolha pelo menos a coluna do nome.");
+  document.getElementById("impPasso2").innerHTML = "<p style='padding:12px'>Importando… pode levar alguns minutos.</p>";
+  const d = await api("/atlas-api/importar/executar", {method:"POST", headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({token: importAtual.token, mapa,
+      categoria: document.getElementById("impCategoria")?.value,
+      origem: document.getElementById("impOrigem")?.value})});
+  if (d.erro) return document.getElementById("impPasso2").innerHTML =
+    `<p style="padding:12px;color:#b3261e">${d.erro}</p>`;
+  document.getElementById("impPasso2").innerHTML = `
+    <div style="background:#e8f8ef;padding:14px;border-radius:8px;margin-top:12px">
+      <b style="color:var(--verde-esc)">Importação concluída</b>
+      <ul style="margin:8px 0 0 18px;font-size:14px;line-height:1.7">
+        <li>${fmt(d.linhas)} linhas lidas</li>
+        <li><b>${fmt(d.pessoas_novas)}</b> contatos novos cadastrados</li>
+        <li><b>${fmt(d.ligadas_a_fazenda)}</b> ligados a uma fazenda</li>
+        ${d.sem_fazenda ? `<li>${fmt(d.sem_fazenda)} sem fazenda correspondente</li>`:""}
+        ${d.sem_nome ? `<li>${fmt(d.sem_nome)} linhas ignoradas (sem nome)</li>`:""}
+      </ul>
+      ${Object.keys(d.como_ligou||{}).length ? `<div style="margin-top:8px;font-size:13px;color:#7a8794">
+        Ligou por: ${Object.entries(d.como_ligou).map(([k,v])=>`${k} (${fmt(v)})`).join(" · ")}</div>`:""}
+    </div>`;
+  atualizarTudo();
+}
+
+async function salvarTerritorio(){
+  const nome = document.getElementById("ntNome").value.trim();
+  const muns = [...document.querySelectorAll("#ntLista input:checked")].map(i=>i.value);
+  if(!nome || !muns.length) return alert("Dê um nome e marque pelo menos um município.");
+  await api("/atlas-api/territorios", {method:"POST", headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({nome, municipios: muns})});
+  fecharGaveta(); carregarTerritorios();
+}
+
+async function carregarMunicipios(){
+  const ms = await api("/atlas-api/municipios");
+  municipiosCache = ms;
+  const alvo = document.getElementById("listaMun");
+  alvo.innerHTML = ms.filter(m=>m.fazendas>0).map(m =>
+    `<div class="mun" data-id="${m.id}"><span>${m.nome}${m.uf!=='GO'?' ('+m.uf+')':''}</span><small>${fmt(m.fazendas)}</small></div>`).join("");
+  document.querySelectorAll(".mun:not(.ter)").forEach(el => el.onclick = () => {
+    document.querySelectorAll(".mun").forEach(x=>x.classList.remove("ativo"));
+    el.classList.add("ativo");
+    munAtivo = el.dataset.id || ""; terAtivo = ""; pagina = 1;
+    document.getElementById("subtitulo").textContent =
+      munAtivo ? el.querySelector("span").textContent : "Goiás — todas as fazendas";
+    atualizarTudo();
+  });
+  document.getElementById("buscaMun").oninput = e => {
+    const q = e.target.value.toLowerCase();
+    document.querySelectorAll("#listaMun .mun").forEach(el =>
+      el.style.display = el.textContent.toLowerCase().includes(q) ? "" : "none");
+  };
+}
+
+async function carregarResumo(){
+  const r = await api("/atlas-api/resumo?" + escopo());
+  document.getElementById("kFaz").textContent   = fmt(r.totais.fazendas);
+  document.getElementById("kArea").textContent  = fmt(r.totais.area_ha);
+  document.getElementById("kMedia").textContent = fmt(r.totais.tamanho_medio);
+  const cli  = (r.categorias.find(c=>c.categoria==="cliente")||{}).qtde||0;
+  const lead = (r.categorias.find(c=>c.categoria==="lead")||{}).qtde||0;
+  document.getElementById("kCli").textContent = fmt(cli)+" / "+fmt(lead);
+}
+
+async function carregarFazendas(){
+  const busca = document.getElementById("busca").value;
+  const cat = document.getElementById("fCat").value;
+  const ps = escopo({pagina});
+  if (busca) ps.set("busca", busca);
+  if (cat) ps.set("categoria", cat);
+  const r = await api("/atlas-api/fazendas?"+ps);
+  document.getElementById("tbFaz").innerHTML = r.fazendas.map(f => `
+    <tr class="linha" onclick="abrirFazenda(${f.id})">
+      <td>${f.nome}</td><td>${f.municipio||"–"}</td>
+      <td>${fmt(Math.round(f.area_total_ha))}</td>
+      <td>${f.perimetro_km ? f.perimetro_km.toFixed(2) : "–"}</td>
+      <td><span class="tag ${f.categoria}">${f.categoria.replace("_"," ")}</span></td>
+    </tr>`).join("");
+  const ult = Math.max(1, Math.ceil(r.total / r.por_pagina));
+  document.getElementById("pgInfo").textContent = `${r.pagina} de ${fmt(ult)} (${fmt(r.total)} fazendas)`;
+  document.getElementById("pgAnt").disabled = r.pagina <= 1;
+  document.getElementById("pgProx").disabled = r.pagina >= ult;
+}
+
+/* ---- contornos das fazendas desenhados direto no mapa ---- */
+let camadaAreas, buscaAreas, avisoAreas;
+const ZOOM_CONTORNOS = 8;   // a partir daqui vale a pena desenhar os contornos
+                            // (um município inteiro cabe na tela nesse zoom)
+
+function corDa(cat){
+  return cat==="cliente" ? "#00e676" : cat==="lead" ? "#ffc400"
+       : cat==="descartada" ? "#ff5252" : "#ffea00";
+}
+
+async function carregarAreas(){
+  if (!mapa) return;
+  const z = mapa.getZoom();
+  if (z < ZOOM_CONTORNOS){                 // muito longe: mostra só os pontos
+    if (camadaAreas){ camadaAreas.remove(); camadaAreas = null; }
+    if (camadaPontos && !mapa.hasLayer(camadaPontos)) camadaPontos.addTo(mapa);
+    mostrarAviso("");
+    return;
+  }
+  if (camadaPontos && mapa.hasLayer(camadaPontos)) camadaPontos.remove();
+
+  const b = mapa.getBounds();
+  const ps = escopo({norte:b.getNorth(), sul:b.getSouth(),
+                     leste:b.getEast(),  oeste:b.getWest()});
+  const cat = document.getElementById("fCat").value;
+  if (cat) ps.set("categoria", cat);
+
+  clearTimeout(buscaAreas);
+  mostrarAviso("carregando contornos…");
+  const d = await api("/atlas-api/contornos?" + ps);
+  if (camadaAreas) camadaAreas.remove();
+  camadaAreas = L.layerGroup(d.fazendas.map(f =>
+    L.polygon(f.aneis.map(a => a.map(([x,y]) => [y,x])), {
+      color: corDa(f.categoria), weight: 1.4, opacity: .95,
+      fillColor: corDa(f.categoria), fillOpacity: .12
+    }).bindPopup(
+      `<b>${f.nome}</b><br>${fmt(Math.round(f.area_total_ha))} ha` +
+      `<br>Perímetro: ${f.perimetro_km ? f.perimetro_km.toFixed(2) : "–"} km` +
+      `<br><a href="#" onclick="abrirFazenda(${f.id});return false">abrir ficha</a>`)
+  )).addTo(mapa);
+
+  mostrarAviso(d.mostrando < d.total_na_area
+    ? `mostrando as ${fmt(d.mostrando)} maiores de ${fmt(d.total_na_area)} — aproxime para ver todas`
+    : `${fmt(d.mostrando)} fazendas nesta área`);
+}
+
+function mostrarAviso(txt){
+  if (!avisoAreas){
+    avisoAreas = L.control({position:"bottomleft"});
+    avisoAreas.onAdd = () => {
+      const d = L.DomUtil.create("div");
+      d.style.cssText = "background:rgba(255,255,255,.9);padding:4px 8px;border-radius:6px;font-size:12px";
+      d._set = t => { d.innerHTML = t; d.style.display = t ? "block" : "none"; };
+      avisoAreas._div = d; return d;
+    };
+    avisoAreas.addTo(mapa);
+  }
+  if (avisoAreas._div) avisoAreas._div._set(txt);
+}
+
+async function carregarMapa(){
+  const pts = await api("/atlas-api/pontos?" + escopo());
+  if (camadaPontos) camadaPontos.remove();
+  camadaPontos = L.layerGroup(pts.map(p =>
+    L.circleMarker([p.latitude, p.longitude], {
+      radius: Math.min(10, 3 + Math.sqrt((p.area_total_ha||1))/40),
+      // cores vivas com contorno branco para aparecerem bem sobre o satélite
+      fillColor: p.categoria==="cliente" ? "#00e676"
+               : p.categoria==="lead"    ? "#ffc400"
+               : p.categoria==="descartada" ? "#ff5252" : "#40c4ff",
+      color: "#ffffff", weight: 1.2, opacity: .9, fillOpacity: .8
+    }).bindPopup(`<b>${p.nome}</b><br>${fmt(p.area_total_ha)} ha`)
+      .on("click", ()=>abrirFazenda(p.id))
+  ));
+  camadaPontos.addTo(mapa);
+  if (pts.length){
+    const lats = pts.map(p=>p.latitude), lons = pts.map(p=>p.longitude);
+    const cx = [[Math.min(...lats),Math.min(...lons)],[Math.max(...lats),Math.max(...lons)]];
+    // o mapa só aceita o enquadramento depois que o navegador termina o layout;
+    // tentamos algumas vezes até o zoom fazer sentido para o estado inteiro
+    let tentativas = 0;
+    const meuTurno = ++turnoMapa;   // se o usuário abrir um contorno, este loop para
+    (function enquadrar(){
+      if (meuTurno !== turnoMapa) return;
+      mapa.invalidateSize();
+      mapa.fitBounds(cx, {padding:[20,20], animate:false});
+      if (mapa.getZoom() > 12 && ++tentativas < 10) setTimeout(enquadrar, 250);
+      else carregarAreas();     // enquadrou: já desenha os contornos visíveis
+    })();
+  } else {
+    carregarAreas();
+  }
+}
+
+function atualizarTudo(){ carregarResumo(); carregarFazendas(); carregarMapa(); carregarCulturas(); }
+
+async function abrirFazenda(id){
+  const d = await api("/atlas-api/fazenda/"+id);
+  const f = d.fazenda;
+  document.getElementById("gNome").textContent = f.nome;
+  document.getElementById("gCar").textContent = f.codigo_car || "";
+  const cats = ["cliente","lead","descartada","sem_categoria"];
+  document.getElementById("gCorpo").innerHTML = `
+    <div class="catbtns">${cats.map(c =>
+      `<button class="${f.categoria===c?'sel':''}" onclick="mudarCat(${f.id},'${c}')">${c.replace("_"," ")}</button>`).join("")}
+    </div>
+    <div class="campo"><b>Município</b>${f.municipio||"–"} ${f.uf?("("+f.uf+")"):""}</div>
+    <div class="campo"><b>Área declarada no CAR</b>${fmt(Math.round(f.area_total_ha))} ha
+      ${f.area_calculada_ha?`<small style="color:#7a8794"> · medida pelo contorno: ${fmt(Math.round(f.area_calculada_ha))} ha</small>`:""}</div>
+    <div class="campo"><b>Perímetro</b>${f.perimetro_km ? f.perimetro_km.toFixed(2)+" km" : "–"}</div>
+    <div class="campo"><b>Situação do CAR</b>${f.status_car||"–"}</div>
+    <div class="campo"><b>Coordenadas</b>${f.latitude?f.latitude.toFixed(5)+", "+f.longitude.toFixed(5):"–"}</div>
+    <div class="form-inline">
+      <button onclick="verNoMapa(${f.id})" style="background:var(--azul)">🛰️ Ver o contorno no mapa</button>
+      <button onclick="enviarParaFunil(${f.id})" style="background:#0e7a43">➕ Enviar para o meu funil</button>
+    </div>
+    <div id="avisoFunil" style="font-size:13px;margin-top:6px"></div>
+
+    <div class="secao"><h4>Uso do solo (MapBiomas 2023)</h4>
+      ${d.culturas.length ? `<table>${d.culturas.map(c=>`
+        <tr><td style="padding:5px 0">🌿 ${c.nome}</td>
+            <td style="padding:5px 0;text-align:right"><b>${fmt(Math.round(c.area_ha))}</b> ha</td></tr>`).join("")}
+        ${f.area_vegetacao_nativa_ha ? `<tr><td style="padding:5px 0;color:#7a8794">🌳 Vegetação nativa</td>
+            <td style="padding:5px 0;text-align:right;color:#7a8794">${fmt(Math.round(f.area_vegetacao_nativa_ha))} ha</td></tr>`:""}
+        ${f.area_agua_ha ? `<tr><td style="padding:5px 0;color:#7a8794">💧 Água</td>
+            <td style="padding:5px 0;text-align:right;color:#7a8794">${fmt(Math.round(f.area_agua_ha))} ha</td></tr>`:""}
+        </table>` : "<small>Sem dados de cultura para esta propriedade.</small>"}
+    </div>
+
+    <div class="secao"><h4>Proprietários / contatos</h4>
+      <div id="gPessoas">${d.pessoas.map(p=>`
+        <div class="pessoa"><b>${p.nome}</b> — ${p.relacao_fundiaria||""}<br>
+        ${p.telefone||""} ${p.email||""} ${p.documento?("· "+p.documento):""}</div>`).join("") || "<small>Nenhum contato ainda — cadastre abaixo.</small>"}
+      </div>
+      <div class="form-inline">
+        <input id="npNome" placeholder="Nome do proprietário">
+        <input id="npTel" placeholder="Telefone / WhatsApp">
+        <input id="npEmail" placeholder="E-mail (opcional)">
+        <button onclick="novoProprietario(${f.id})">+ Adicionar contato</button>
+      </div>
+    </div>
+
+    <div class="secao"><h4>Registros da equipe</h4>
+      <div id="gRegs">${d.registros.map(r=>`
+        <div class="registro">${r.texto}<br><small>${r.autor||""} · ${r.criado_em||""}</small></div>`).join("") || "<small>Nenhum registro ainda.</small>"}
+      </div>
+      <div class="form-inline">
+        <textarea id="nrTexto" rows="2" placeholder="Ex: Visitei a fazenda, produtor pediu cotação de..."></textarea>
+        <button onclick="novoRegistro(${f.id})">+ Salvar registro</button>
+      </div>
+    </div>`;
+  document.getElementById("gaveta").classList.add("aberta");
+  document.getElementById("fundo").classList.add("on");
+}
+/* desenha o contorno real da propriedade sobre a imagem de satélite */
+let camadaContorno;
+async function verNoMapa(id){
+  const d = await api(`/atlas-api/fazenda/${id}/contorno`);
+  if (!d.aneis || !d.aneis.length) return alert("Contorno não disponível para esta fazenda.");
+  if (camadaContorno) camadaContorno.remove();
+  turnoMapa++;   // impede que o enquadramento geral roube o zoom logo depois
+  // o banco guarda [longitude, latitude]; o mapa espera [latitude, longitude]
+  const aneis = d.aneis.map(a => a.map(([x,y]) => [y,x]));
+  camadaContorno = L.polygon(aneis, {color:"#ffffff", weight:3.5, fillColor:"#ffffff",
+                                     fillOpacity:.18, dashArray:"6 4"}).addTo(mapa);
+  fecharGaveta();
+  mapa.invalidateSize();
+  mapa.fitBounds(camadaContorno.getBounds(), {padding:[30,30]});
+  document.getElementById("mapa").scrollIntoView({behavior:"smooth", block:"center"});
+}
+
+
+/* ---- manda a fazenda para o funil do CRM como lead ---- */
+let usuarioCRM = null;
+async function carregarUsuario(){
+  try{
+    const u = await (await fetch("/api/me")).json();
+    usuarioCRM = u.user || u;
+    if (usuarioCRM && usuarioCRM.nome)
+      document.getElementById("usuarioLogado").textContent = usuarioCRM.nome + " · " + (usuarioCRM.papel||"");
+  }catch(e){ /* fora do CRM, segue sem identificar */ }
+}
+
+/* O CRM exige nome, telefone E e-mail para abrir um lead — sem contato o lead
+   nao e trabalhavel. Entao pedimos aqui mesmo, ja aproveitando o que a fazenda
+   tiver cadastrado. */
+async function enviarParaFunil(id){
+  const cx = document.getElementById("avisoFunil");
+  const d = await api("/atlas-api/fazenda/" + id);
+  const f = d.fazenda;
+  const c = (d.pessoas || [])[0] || {};
+  cx.innerHTML = `
+    <div style="background:var(--cinza);padding:12px;border-radius:8px;margin-top:8px">
+      <b style="font-size:13px">Dados do contato para abrir o lead</b>
+      <div class="form-inline" style="margin-top:8px">
+        <input id="fnNome"  placeholder="Nome do produtor / empresa *" value="${(c.nome||"").replace(/"/g,'&quot;')}">
+        <input id="fnTel"   placeholder="Telefone / WhatsApp *" value="${c.telefone||""}">
+        <input id="fnEmail" placeholder="E-mail *" value="${c.email||""}">
+        <button onclick="confirmarFunil(${id})">Criar lead no meu funil</button>
+      </div>
+      <div id="fnStatus" style="font-size:13px;margin-top:8px"></div>
+    </div>`;
+}
+
+async function confirmarFunil(id){
+  const st = document.getElementById("fnStatus");
+  const nome  = document.getElementById("fnNome").value.trim();
+  const tel   = document.getElementById("fnTel").value.trim();
+  const email = document.getElementById("fnEmail").value.trim();
+  if (!nome || !tel || !email){
+    st.style.color = "#b3261e";
+    st.textContent = "O CRM precisa de nome, telefone e e-mail para abrir o lead.";
+    return;
+  }
+  const d = await api("/atlas-api/fazenda/" + id);
+  const f = d.fazenda;
+  const culturas = (d.culturas||[]).slice(0,3)
+      .map(c => c.nome + " " + fmt(Math.round(c.area_ha)) + " ha").join(", ");
+  st.style.color = "#7a8794"; st.textContent = "Enviando…";
+
+  const r = await fetch("/api/leads", {method:"POST", headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({
+      nome, telefone: tel, email,
+      cidade: f.municipio || "", uf: f.uf || "GO",
+      area: Math.round(f.area_total_ha || 0),
+      source: "prospeccao-atlas",
+      observacoes:
+        "Prospecção pelo mapa\n" +
+        "Fazenda: " + f.nome + "\n" +
+        "CAR: " + (f.codigo_car || "-") + "\n" +
+        "Área: " + fmt(Math.round(f.area_total_ha||0)) + " ha · Perímetro: " +
+          (f.perimetro_km ? f.perimetro_km.toFixed(2) : "-") + " km\n" +
+        (culturas ? "Culturas: " + culturas + "\n" : "") +
+        "Coordenadas: " + (f.latitude ? f.latitude.toFixed(5) + ", " + f.longitude.toFixed(5) : "-")
+    })});
+  const res = await r.json().catch(()=>({}));
+  if (!r.ok){
+    st.style.color = "#b3261e";
+    st.textContent = res.error || "Não consegui criar o lead.";
+    return;
+  }
+  // guarda o contato na fazenda, marca como lead e registra quem prospectou
+  await api("/atlas-api/fazenda/" + id + "/proprietario", {method:"POST",
+    headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({nome, telefone: tel, email, relacao_comercial:"lead"})});
+  await api("/atlas-api/fazenda/" + id + "/categoria", {method:"POST",
+    headers:{"Content-Type":"application/json"}, body: JSON.stringify({categoria:"lead"})});
+  await api("/atlas-api/fazenda/" + id + "/registro", {method:"POST",
+    headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({texto:"Enviado para o funil do CRM como lead: " + nome + " · " + tel})});
+  st.style.color = "#0e7a43";
+  st.innerHTML = '✅ Lead criado no seu funil. <a href="/">abrir o CRM</a>';
+  carregarFazendas(); carregarResumo();
+}
+
+function fecharGaveta(){
+  document.getElementById("gaveta").classList.remove("aberta");
+  document.getElementById("fundo").classList.remove("on");
+}
+document.getElementById("fundo").onclick = fecharGaveta;
+
+async function mudarCat(id, cat){
+  await api(`/atlas-api/fazenda/${id}/categoria`, {method:"POST",
+    headers:{"Content-Type":"application/json"}, body: JSON.stringify({categoria:cat})});
+  abrirFazenda(id); carregarFazendas(); carregarResumo();
+}
+async function novoProprietario(id){
+  const nome = document.getElementById("npNome").value.trim();
+  if(!nome) return alert("Digite o nome");
+  await api(`/atlas-api/fazenda/${id}/proprietario`, {method:"POST",
+    headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({nome, telefone:document.getElementById("npTel").value,
+                          email:document.getElementById("npEmail").value})});
+  abrirFazenda(id);
+}
+async function novoRegistro(id){
+  const texto = document.getElementById("nrTexto").value.trim();
+  if(!texto) return alert("Digite o registro");
+  await api(`/atlas-api/fazenda/${id}/registro`, {method:"POST",
+    headers:{"Content-Type":"application/json"}, body: JSON.stringify({texto})});
+  abrirFazenda(id);
+}
+
+document.getElementById("busca").oninput = () => { pagina = 1; carregarFazendas(); };
+document.getElementById("fCat").onchange = () => { pagina = 1; carregarFazendas(); };
+document.getElementById("fArea").onchange = () => { pagina = 1; atualizarTudo(); };
+document.getElementById("fCult").onchange = () => { pagina = 1; atualizarTudo(); };
+document.getElementById("fCultMin").onchange = () => { pagina = 1; atualizarTudo(); };
+document.getElementById("pgAnt").onclick = () => { pagina--; carregarFazendas(); };
+document.getElementById("pgProx").onclick = () => { pagina++; carregarFazendas(); };
+
+mapa = L.map("mapa").setView([-16.0, -49.5], 6);
+
+/* camadas de fundo: satélite (padrão) e mapa comum */
+const satelite = L.tileLayer(
+  "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+  {maxZoom: 19, attribution: "Imagens: Esri, Maxar, Earthstar Geographics"});
+const rotulos = L.tileLayer(
+  "https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}",
+  {maxZoom: 19});
+const ruas = L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
+  {maxZoom: 19, attribution: "© OpenStreetMap"});
+
+satelite.addTo(mapa); rotulos.addTo(mapa);
+
+L.control.layers(
+  {"🛰️ Satélite": satelite, "🗺️ Mapa comum": ruas},
+  {"Nomes de cidades": rotulos},
+  {position: "topright", collapsed: false}
+).addTo(mapa);
+
+/* ao arrastar ou dar zoom, recarrega os contornos da nova área */
+mapa.on("moveend zoomend", () => {
+  clearTimeout(buscaAreas);
+  buscaAreas = setTimeout(carregarAreas, 350);
+});
+
+carregarUsuario();
+carregarMunicipios();
+carregarTerritorios();
+carregarListaCulturas();
+document.getElementById("subtitulo").textContent = "Goiás — todas as fazendas";
+atualizarTudo();
+</script>
+</body>
+</html>

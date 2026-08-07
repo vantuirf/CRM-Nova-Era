@@ -791,6 +791,19 @@ label input:focus, label select:focus, label textarea:focus {
 .import-list { margin: 6px 0 0; padding-left: 18px; font-size: 12.5px; color: var(--muted); max-height: 180px; overflow-y: auto; }
 .import-list li { margin-bottom: 3px; }
 
+/* ---------- Tarefas do cliente ---------- */
+.tarefa-nova { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.tarefa-nova input[type="date"] { font: inherit; padding: 7px 9px; border: 1px solid var(--line); border-radius: 8px; }
+.tarefa-nova #tarefaTexto { flex: 1; min-width: 160px; font: inherit; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; }
+.tarefa-item { display: flex; align-items: center; gap: 9px; border: 1px solid var(--line); border-radius: 9px; padding: 7px 10px; margin-top: 7px; }
+.tarefa-item input[type="checkbox"] { width: 17px; height: 17px; flex-shrink: 0; }
+.tarefa-item .tx { flex: 1; font-size: 13px; }
+.tarefa-item.feita .tx { text-decoration: line-through; color: var(--muted); }
+.tarefa-item .tprazo { font-size: 11px; font-weight: 700; color: var(--muted); background: #f1f4f2; border-radius: 7px; padding: 2px 8px; white-space: nowrap; }
+.tarefa-item .tprazo.hoje { background: #fff5d6; color: #8a6100; }
+.tarefa-item .tprazo.vencida { background: #fde3e1; color: #b02a1f; }
+.tarefa-vazia { color: var(--muted); font-size: 12.5px; padding: 4px 0; }
+
 /* ---------- Visitas de campo ---------- */
 .modal-top { z-index: 60; } /* fica acima do modal do lead */
 .visit-count { color: var(--green-700); font-weight: 800; }

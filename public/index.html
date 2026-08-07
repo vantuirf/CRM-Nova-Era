@@ -85,6 +85,7 @@
       <button class="view-tab" id="tabPerdidos" role="tab">🚩 P/ concorrente</button>
       <button class="view-tab" id="tabDesistiu" role="tab">🚫 Desistiu</button>
       <button class="view-tab" id="tabMap" role="tab">🗺️ Mapa</button>
+      <button class="view-tab" id="tabProspeccao" role="tab" title="Mapa de fazendas para prospectar novos clientes">🛰️ Prospecção</button>
     </div>
     <div class="escopo-switch" id="boardViewSwitch" role="tablist" aria-label="Modo de visualização" title="Como mostrar o quadro">
       <button type="button" class="escopo-opt bv-opt active" id="bvRaias" data-bv="raias">🧭 Raias</button>
@@ -306,6 +307,14 @@
           <label class="full">Observações
             <textarea name="observacoes" rows="3" placeholder="Anotações do atendimento…"></textarea>
           </label>
+
+          <div class="section-title full">📋 Tarefas <span id="tarefaCount" class="visit-count"></span></div>
+          <div class="full tarefa-nova">
+            <input id="tarefaTexto" maxlength="300" placeholder="Ex.: ligar sexta, enviar proposta…" />
+            <input id="tarefaPrazo" type="date" title="Prazo (opcional)" />
+            <button class="btn primary small" id="btnAddTarefa" type="button">➕ Criar tarefa</button>
+          </div>
+          <div class="full" id="tarefaList"><!-- lista via JS --></div>
 
           <div class="section-title full">🚗 Visitas de campo <span id="visitCount" class="visit-count"></span></div>
           <div class="full">
@@ -715,5 +724,10 @@
   <div class="toast" id="toast" hidden></div>
 
   <script src="app.js"></script>
+<script>
+  document.getElementById('tabProspeccao').addEventListener('click', function(){
+    window.location.href = '/prospeccao.html';
+  });
+</script>
 </body>
 </html>

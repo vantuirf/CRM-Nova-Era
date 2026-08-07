@@ -536,7 +536,7 @@ function atualizaBotaoLimpar() {
 function leadsDaVisao() {
   if (currentView === 'perdidos') return leadsCache.filter((l) => l.status === 'perdido');
   if (currentView === 'desistiu') return leadsCache.filter((l) => l.status === 'desistiu');
-  if (currentView === 'alertas') return leadsCache.filter((l) => !!l.cliente_respondeu || !!l.aguardando_resposta || !!precisaRetorno(l));
+  if (currentView === 'alertas') return leadsCache.filter((l) => !!l.cliente_respondeu || !!tarefaAlerta(l) || !!l.aguardando_resposta || !!precisaRetorno(l));
   if (currentView === 'map') return leadsCache.slice();
   return leadsCache.filter((FUNIS[currentView] || FUNIS.sdr).inclui);
 }
@@ -809,6 +809,22 @@ function aguardaResposta(lead) {
   if (isNaN(t)) return null;
   const ms = Date.now() - t;
   return { ms, urgente: ms >= respostaHoras() * 3600000 };
+}
+
+// Tarefa aberta com prazo p/ hoje ou vencido → aviso no card e na central.
+// Devolve {ms, vencida} da tarefa mais urgente, ou null.
+function tarefaAlerta(lead) {
+  if (!lead || STATUS_ENCERRADOS.includes(lead.status)) return null;
+  const hoje = new Date(); hoje.setHours(0, 0, 0, 0);
+  let pior = null;
+  for (const t of (lead.tarefas || [])) {
+    if (t.feita || !t.prazo) continue;
+    const p = new Date(String(t.prazo).slice(0, 10) + 'T00:00');
+    if (isNaN(p.getTime()) || p > hoje) continue;
+    if (!pior || p < pior) pior = p;
+  }
+  if (!pior) return null;
+  return { ms: hoje - pior, vencida: pior < hoje, texto: '' };
 }
 
 // "Cliente respondeu — responda!" (o webhook do Chatwoot acende quando chega
@@ -1166,6 +1182,8 @@ function renderDesistiu() {
 function alertaOrdem(l) {
   const cr = clienteRespondeu(l);
   if (cr) return [0, -cr.ms]; // cliente esperando resposta = topo
+  const ta = tarefaAlerta(l);
+  if (ta) return [ta.vencida ? 0 : 2, -ta.ms];
   const ar = aguardaResposta(l);
   if (ar) return [ar.urgente ? 0 : 2, -ar.ms];
   const rt = precisaRetorno(l);
@@ -1176,7 +1194,7 @@ function alertaOrdem(l) {
 // Central de Alertas: junta "respostas a registrar" + "retornos a fazer" de TODOS
 // os funis num lugar só (o card de stats e o contador são globais). Urgentes no topo.
 function renderAlertas() {
-  const leads = leadsCache.filter((l) => !!l.cliente_respondeu || !!l.aguardando_resposta || !!precisaRetorno(l));
+  const leads = leadsCache.filter((l) => !!l.cliente_respondeu || !!tarefaAlerta(l) || !!l.aguardando_resposta || !!precisaRetorno(l));
   const head = $('#alertasHead');
   head.innerHTML = '';
   head.append(el('div', 'lost-count', `🔔 ${leads.length} ${leads.length === 1 ? 'lead precisa de você' : 'leads precisam de você'}`));
@@ -1405,11 +1423,17 @@ function renderCard(lead) {
   }
   card.append(nome);
   const cr = clienteRespondeu(lead);
-  const ar = cr ? null : aguardaResposta(lead);
+  const tfa = cr ? null : tarefaAlerta(lead);
+  const ar = (cr || tfa) ? null : aguardaResposta(lead);
   if (cr) {
     const w = el('div', 'wait-reply respondeu');
     w.append(el('span', 'ic', '💬'), document.createTextNode(
       `Cliente respondeu há ${duracao(cr.ms)} — veja o chat e responda!`));
+    card.append(w);
+  } else if (tfa) {
+    const w = el('div', 'wait-reply ' + (tfa.vencida ? 'urgente' : 'pendente'));
+    w.append(el('span', 'ic', '📋'), document.createTextNode(
+      tfa.vencida ? `Tarefa atrasada há ${duracao(tfa.ms)} — abra e resolva!` : 'Tarefa para HOJE — abra o card'));
     card.append(w);
   } else if (ar) {
     const w = el('div', 'wait-reply ' + (ar.urgente ? 'urgente' : 'pendente'));
@@ -1559,6 +1583,11 @@ function renderCard(lead) {
 function alertaCurto(lead) {
   const cr = clienteRespondeu(lead);
   if (cr) return { cls: 'respondeu', txt: '💬 respondeu há ' + duracao(cr.ms) };
+  const ta = tarefaAlerta(lead);
+  if (ta) {
+    return ta.vencida ? { cls: 'urgente', txt: '📋 tarefa atrasada ' + duracao(ta.ms) }
+                      : { cls: 'pendente', txt: '📋 tarefa p/ hoje' };
+  }
   const ar = aguardaResposta(lead);
   if (ar) {
     return ar.urgente ? { cls: 'urgente', txt: '⏰ pendente há ' + duracao(ar.ms) }
@@ -1946,6 +1975,7 @@ function openModal(lead) {
   renderPagamentos(lead.formas_pagamento || []);
   modalPagInitial = JSON.stringify(canonPagamentos(lead.formas_pagamento || []));
   renderVisitas(isNew ? null : lead);
+  renderTarefas(isNew ? null : lead);
   $('#btnRegistrarVisita').disabled = isNew;
   $('#histNota').value = ''; // rascunho de nota é por-lead: limpa ao abrir outro
   renderHistorico(isNew ? null : lead);
@@ -2346,6 +2376,75 @@ async function adicionarNota() {
     btn.disabled = false; ta.disabled = false; btn.textContent = 'Adicionar';
   }
 }
+
+// ---- Tarefas do cliente (dentro da ficha) ----
+function renderTarefas(lead) {
+  const list = $('#tarefaList');
+  const count = $('#tarefaCount');
+  list.innerHTML = '';
+  const abertas = lead ? (lead.tarefas || []).filter((t) => !t.feita).length : 0;
+  count.textContent = abertas ? `(${abertas} aberta${abertas > 1 ? 's' : ''})` : '';
+  if (!lead) { list.append(el('div', 'tarefa-vazia', 'Salve o lead primeiro para criar tarefas.')); return; }
+  const ts = (lead.tarefas || []).slice().sort((a, b) => (a.feita - b.feita) || String(a.prazo || '9999').localeCompare(String(b.prazo || '9999')));
+  if (!ts.length) { list.append(el('div', 'tarefa-vazia', 'Nenhuma tarefa ainda — crie a primeira acima. 👆')); return; }
+  const hoje = new Date().toLocaleDateString('sv-SE'); // AAAA-MM-DD local
+  for (const t of ts) {
+    const row = el('div', 'tarefa-item' + (t.feita ? ' feita' : ''));
+    const chk = document.createElement('input');
+    chk.type = 'checkbox'; chk.checked = !!t.feita;
+    chk.title = t.feita ? 'Reabrir a tarefa' : 'Marcar como concluída';
+    chk.onchange = () => alternarTarefa(lead.id, t.id, chk.checked);
+    row.append(chk);
+    const tx = el('span', 'tx', t.texto);
+    tx.title = 'Criada por ' + (t.criada_por || '—') + (t.feita && t.feita_por ? ' · concluída por ' + t.feita_por : '');
+    row.append(tx);
+    if (t.prazo) {
+      const p = String(t.prazo).slice(0, 10);
+      const cls = t.feita ? '' : (p < hoje ? ' vencida' : p === hoje ? ' hoje' : '');
+      row.append(el('span', 'tprazo' + cls, '📅 ' + fmtDia(p)));
+    }
+    const del = el('button', 'icon-btn', '🗑️');
+    del.type = 'button'; del.title = 'Excluir tarefa';
+    del.onclick = async () => {
+      if (!confirm(`Excluir a tarefa "${t.texto}"?`)) return;
+      try {
+        const r = await api('/api/leads/' + encodeURIComponent(lead.id) + '/tarefas/' + encodeURIComponent(t.id), { method: 'DELETE' });
+        aplicaTarefas(lead.id, r.tarefas);
+      } catch (err) { toast('Erro: ' + err.message); }
+    };
+    row.append(del);
+    list.append(row);
+  }
+}
+function aplicaTarefas(leadId, tarefas) {
+  const lead = leadsCache.find((l) => l.id === leadId);
+  if (lead && tarefas) lead.tarefas = tarefas;
+  if (form.id.value === leadId) { renderTarefas(lead); renderHistorico(lead); }
+  renderBoard();
+  loadStats();
+}
+async function alternarTarefa(leadId, tarefaId, feita) {
+  try {
+    const r = await api('/api/leads/' + encodeURIComponent(leadId) + '/tarefas/' + encodeURIComponent(tarefaId),
+      { method: 'PATCH', body: JSON.stringify({ feita }) });
+    aplicaTarefas(leadId, r.tarefas);
+    toast(feita ? '✅ Tarefa concluída' : 'Tarefa reaberta');
+  } catch (err) { toast('Erro: ' + err.message); }
+}
+$('#btnAddTarefa').addEventListener('click', async () => {
+  const id = form.id.value;
+  if (!id) { toast('Salve o lead primeiro para criar tarefas'); return; }
+  const texto = $('#tarefaTexto').value.trim();
+  if (!texto) { toast('Escreva a tarefa antes de criar'); return; }
+  try {
+    const r = await api('/api/leads/' + encodeURIComponent(id) + '/tarefas',
+      { method: 'POST', body: JSON.stringify({ texto, prazo: $('#tarefaPrazo').value }) });
+    $('#tarefaTexto').value = '';
+    $('#tarefaPrazo').value = '';
+    aplicaTarefas(id, r.tarefas);
+    toast('📋 Tarefa criada');
+  } catch (err) { toast('Erro: ' + err.message); }
+});
 
 function renderVisitas(lead) {
   const visitas = (lead && lead.visitas) || [];
