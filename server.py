@@ -60,6 +60,9 @@ PUBLIC_DIR = os.path.join(BASE_DIR, "public")
 # ---------------------------------------------------------------------------
 ATLAS_GZ = os.path.join(BASE_DIR, "atlas.db.gz")
 ATLAS_DB = os.path.join(DATA_DIR, "atlas.db")
+# Pivos centrais de irrigacao (ANA, dados abertos). Vem em arquivo proprio para
+# nao depender do atlas.db.gz de 50 MB: a cada boot conferimos a versao.
+PIVOS_GZ = os.path.join(BASE_DIR, "pivos.json.gz")
 # A "versao" dos dados e a impressao digital do proprio atlas.db.gz: gerou um
 # arquivo novo, o boot troca a base sozinho (preservando o que a equipe editou)
 # — sem depender de ninguem lembrar de subir um numero de versao.
@@ -304,8 +307,54 @@ def atlas_boot():
                 COMMIT;
             """)
             print("[atlas] tabela pessoas migrada para chave primaria de verdade")
+        _pivos_boot(con)
         con.commit()
         con.close()
+
+
+def _pivos_boot(con):
+    """Instala/atualiza os pivos centrais no atlas.db a partir do pivos.json.gz.
+    A fonte da verdade e o arquivo do repositorio, entao a troca da base do
+    Atlas nao precisa preservar nada: se o arquivo mudar, a tabela e refeita."""
+    if not os.path.exists(PIVOS_GZ):
+        return
+    try:
+        h = hashlib.sha1()
+        with open(PIVOS_GZ, "rb") as f:
+            for bloco in iter(lambda: f.read(1024 * 512), b""):
+                h.update(bloco)
+        versao = h.hexdigest()
+        con.execute("CREATE TABLE IF NOT EXISTS pivos_meta (v TEXT)")
+        atual = con.execute("SELECT v FROM pivos_meta LIMIT 1").fetchone()
+        tem_tab = con.execute("SELECT 1 FROM sqlite_master WHERE type='table' "
+                              "AND name='pivos'").fetchone()
+        if atual and atual[0] == versao and tem_tab:
+            return
+        with gzip.open(PIVOS_GZ, "rt", encoding="utf-8") as g:
+            dados = json.load(g)
+        con.execute("DROP TABLE IF EXISTS pivos")
+        con.execute("CREATE TABLE pivos (id INTEGER PRIMARY KEY, lat REAL, lng REAL, "
+                    "ha REAL, ano TEXT, ibge TEXT, municipio_id INT)")
+        # de codigo do IBGE para o municipio do Atlas (a chave que os dois lados tem)
+        mapa = {str(r[1]): r[0] for r in
+                con.execute("SELECT id, codigo_ibge FROM municipios").fetchall() if r[1]}
+        linhas = [(round(float(p[1]), 6), round(float(p[0]), 6), float(p[2] or 0),
+                   str(p[4] or ""), str(p[3] or ""), mapa.get(str(p[3] or "")))
+                  for p in dados.get("pivos", [])
+                  if p and p[0] is not None and p[1] is not None]
+        con.executemany("INSERT INTO pivos (lat, lng, ha, ano, ibge, municipio_id) "
+                        "VALUES (?,?,?,?,?,?)", linhas)
+        con.execute("CREATE INDEX IF NOT EXISTS idx_piv_latlng ON pivos(lat, lng)")
+        con.execute("CREATE INDEX IF NOT EXISTS idx_piv_mun ON pivos(municipio_id)")
+        con.execute("DELETE FROM pivos_meta")
+        con.execute("INSERT INTO pivos_meta (v) VALUES (?)", [versao])
+        con.commit()
+        sem_mun = sum(1 for l in linhas if l[5] is None)
+        print("[atlas] %d pivos centrais instalados (%d sem municipio)"
+              % (len(linhas), sem_mun))
+    except Exception as e:
+        # sem pivos o CRM continua funcionando; melhor que derrubar o servidor
+        print("[atlas] nao foi possivel instalar os pivos:", e)
 
 
 def _sem_acento(txt):
@@ -3293,6 +3342,50 @@ class Handler(BaseHTTPRequestHandler):
                 con.execute("DELETE FROM territorios WHERE id = ?", [int(mter.group(1))])
                 con.commit()
                 return self.send_json(200, {"ok": True})
+
+            if path == "/atlas-api/pivos" and method == "GET":
+                # Pivos centrais do recorte. No mapa cada um vira um circulo,
+                # entao devolvemos centro + raio calculado da area.
+                if "pivos" not in tabs:
+                    return self.send_json(200, {"pivos": [], "sem_pivos": True,
+                                                "total": 0, "area_ha": 0})
+                cond, params = ["1=1"], []
+                mun = (qs.get("municipio_id") or [""])[0]
+                ter = (qs.get("territorio_id") or [""])[0]
+                if ter.isdigit():
+                    cond.append("municipio_id IN (SELECT municipio_id FROM "
+                                "territorio_municipios WHERE territorio_id = ?)")
+                    params.append(int(ter))
+                elif mun.isdigit():
+                    cond.append("municipio_id = ?")
+                    params.append(int(mun))
+                try:   # recorte do mapa (opcional)
+                    n = float((qs.get("norte") or [""])[0]); s = float((qs.get("sul") or [""])[0])
+                    le = float((qs.get("leste") or [""])[0]); o = float((qs.get("oeste") or [""])[0])
+                    cond.append("lat BETWEEN ? AND ?")
+                    cond.append("lng BETWEEN ? AND ?")
+                    params += [s, n, o, le]
+                except (ValueError, IndexError):
+                    pass
+                w = " AND ".join(cond)
+                tot = con.execute("SELECT COUNT(*) AS n, ROUND(COALESCE(SUM(ha),0)) AS ha "
+                                  "FROM pivos WHERE " + w, params).fetchone()
+                rows = con.execute(
+                    "SELECT p.id, p.lat, p.lng, p.ha, p.ano, m.nome AS municipio "
+                    "FROM pivos p LEFT JOIN municipios m ON m.id = p.municipio_id "
+                    "WHERE " + w + " ORDER BY p.ha DESC LIMIT 4000", params).fetchall()
+                pivos = []
+                for r in rows:
+                    ha = float(r["ha"] or 0)
+                    # circulo de area equivalente: raio = raiz(area / pi)
+                    raio = int(math.sqrt(max(ha, 0.1) * 10000 / math.pi))
+                    d = dict(r)
+                    d["raio_m"] = raio
+                    pivos.append(d)
+                return self.send_json(200, {
+                    "pivos": pivos, "total": tot["n"] or 0, "area_ha": tot["ha"] or 0,
+                    "mostrando": len(pivos),
+                    "fonte": "ANA — pivôs centrais mapeados até 2019"})
 
             if path == "/atlas-api/potencial" and method == "GET":
                 # Potencial comercial do recorte: "a cada X ha da cultura Y

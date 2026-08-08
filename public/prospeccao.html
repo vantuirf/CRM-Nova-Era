@@ -147,6 +147,7 @@
       <div class="kpi"><b id="kArea">–</b><span>Hectares</span></div>
       <div class="kpi"><b id="kMedia">–</b><span>Tamanho médio (ha)</span></div>
       <div class="kpi"><b id="kCli">–</b><span>Clientes / Leads</span></div>
+      <div class="kpi" title="Pivôs centrais mapeados pela ANA até 2019"><b id="kPiv">–</b><span>💧 Pivôs de irrigação</span></div>
     </div>
 
     <div class="paineis">
@@ -561,7 +562,7 @@ function corDa(cat){
 
 /* De LONGE mostra uma bolha por município com a contagem (assim TODAS as
    fazendas aparecem, não só as 3.000 maiores); de perto, os contornos. */
-let camadaMunicipios, camadaLimite, bboxRecorte = null;
+let camadaMunicipios, camadaLimite, bboxRecorte = null, camadaPivos, pivosLigado = false, turnoPivos = 0;
 // cada pedido de camada leva um número; resposta de pedido antigo é jogada
 // fora (senão o mapa pinta o recorte/zoom anterior por cima do atual)
 let turnoCamada = 0;   // bbox das fazendas do recorte atual
@@ -619,6 +620,38 @@ async function carregarBolhas(){
       });
   })).addTo(mapa);
   mostrarAviso(`${fmt(d.reduce((a,m)=>a+m.fazendas,0))} fazendas em ${d.length} municípios — aproxime para ver uma a uma`);
+}
+
+/* Pivôs do recorte: o contador do topo é sempre do recorte inteiro; os
+   círculos só são desenhados quando o usuário liga a camada. */
+async function carregarPivos(){
+  const ps = new URLSearchParams();
+  if (terAtivo) ps.set("territorio_id", terAtivo);
+  else if (munAtivo) ps.set("municipio_id", munAtivo);
+  const total = await api("/atlas-api/pivos?" + ps);
+  document.getElementById("kPiv").textContent = total.sem_pivos
+    ? "–" : fmt(total.total) + " · " + fmt(total.area_ha) + " ha";
+  if (!pivosLigado || total.sem_pivos){ camadaPivos.clearLayers(); return; }
+
+  // com a camada ligada, desenha só o que está à vista (são 16 mil no estado)
+  const psm = new URLSearchParams(ps);
+  let b = mapa.getBounds();
+  if (Math.abs(b.getEast() - b.getWest()) > 1e-6){
+    psm.set("norte", b.getNorth()); psm.set("sul", b.getSouth());
+    psm.set("leste", b.getEast());  psm.set("oeste", b.getWest());
+  }
+  const meu = ++turnoPivos;
+  const d = await api("/atlas-api/pivos?" + psm);
+  if (meu !== turnoPivos || !pivosLigado) return;   // recorte já mudou
+  camadaPivos.clearLayers();
+  d.pivos.forEach(p => camadaPivos.addLayer(
+    L.circle([p.lat, p.lng], {radius: p.raio_m, color: "#1e90ff", weight: 1.2,
+                              fillColor: "#1e90ff", fillOpacity: .25})
+      .bindTooltip(`💧 Pivô · ${fmt(p.ha)} ha` +
+                   (p.municipio ? ` · ${esc(p.municipio)}` : "") +
+                   (p.ano ? `<br><small>mapeado em ${esc(p.ano)}</small>` : ""))));
+  if (d.total > d.mostrando)
+    mostrarAviso(`mostrando ${fmt(d.mostrando)} dos ${fmt(d.total)} pivôs — aproxime para ver todos`);
 }
 
 async function carregarAreas(){
@@ -750,7 +783,7 @@ async function carregarMapa(){
 }
 
 function atualizarTudo(){ carregarResumo(); carregarFazendas(); carregarMapa();
-                          carregarCulturas(); carregarLimite();
+                          carregarCulturas(); carregarLimite(); carregarPivos();
                           carregarPotencial().catch(()=>{}).then(carregarPessoas); }
 
 async function abrirFazenda(id){
@@ -1209,16 +1242,21 @@ const ruas = L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
 
 satelite.addTo(mapa); rotulos.addTo(mapa);
 
+/* 💧 pivôs centrais (ANA): círculo de área equivalente em cada pivô */
+camadaPivos = L.layerGroup();
 L.control.layers(
   {"🛰️ Satélite": satelite, "🗺️ Mapa comum": ruas},
-  {"Nomes de cidades": rotulos},
+  {"Nomes de cidades": rotulos, "💧 Pivôs de irrigação": camadaPivos},
   {position: "topright", collapsed: false}
 ).addTo(mapa);
+
+mapa.on("overlayadd", ev => { if (ev.layer === camadaPivos){ pivosLigado = true; carregarPivos(); } });
+mapa.on("overlayremove", ev => { if (ev.layer === camadaPivos) pivosLigado = false; });
 
 /* ao arrastar ou dar zoom, recarrega os contornos da nova área */
 mapa.on("moveend zoomend", () => {
   clearTimeout(buscaAreas);
-  buscaAreas = setTimeout(carregarAreas, 350);
+  buscaAreas = setTimeout(() => { carregarAreas(); if (pivosLigado) carregarPivos(); }, 350);
 });
 
 /* o mapa é grande e a página tem rolagem/redimensionamento: sempre que o
