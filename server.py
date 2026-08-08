@@ -63,6 +63,10 @@ ATLAS_DB = os.path.join(DATA_DIR, "atlas.db")
 # Pivos centrais de irrigacao (ANA, dados abertos). Vem em arquivo proprio para
 # nao depender do atlas.db.gz de 50 MB: a cada boot conferimos a versao.
 PIVOS_GZ = os.path.join(BASE_DIR, "pivos.json.gz")
+INICIO_ISO = datetime.now(timezone.utc).isoformat(timespec="seconds")
+# marcos publicados — /api/status usa isto para conferir se o deploy chegou
+RECURSOS = ["funil", "servicos", "curso", "tarefas", "atlas", "proprietarios",
+            "potencial", "pivos"]
 # A "versao" dos dados e a impressao digital do proprio atlas.db.gz: gerou um
 # arquivo novo, o boot troca a base sozinho (preservando o que a equipe editou)
 # — sem depender de ninguem lembrar de subir um numero de versao.
@@ -3802,6 +3806,15 @@ class Handler(BaseHTTPRequestHandler):
     def _handle_api(self, method, parsed):
         path = parsed.path
         qs = parse_qs(parsed.query)
+
+        # ---- Status (aberto): so diz se esta no ar e o que ja foi publicado.
+        # Serve para conferir se um deploy chegou sem precisar entrar no CRM.
+        # Nao expoe dado nenhum de cliente, usuario ou configuracao. ----
+        if path == "/api/status" and method == "GET":
+            return self.send_json(200, {
+                "ok": True,
+                "no_ar_desde": INICIO_ISO,
+                "recursos": RECURSOS})
 
         # ---- Login (unica rota aberta sem sessao) ----
         if path == "/api/login" and method == "POST":
