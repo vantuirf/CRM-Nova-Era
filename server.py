@@ -275,6 +275,15 @@ def atlas_boot():
         con.execute("PRAGMA journal_mode=WAL")
         _atlas_schema_equipe(con)
         con.execute("CREATE INDEX IF NOT EXISTS idx_faz_latlng ON fazendas(latitude, longitude)")
+        con.execute("CREATE INDEX IF NOT EXISTS idx_fp_pessoa ON fazenda_pessoas(pessoa_id)")
+        con.execute("CREATE INDEX IF NOT EXISTS idx_pes_nome ON pessoas(nome)")
+        # Sem estes, o SQLite monta um indice temporario A CADA consulta
+        # ("AUTOMATIC PARTIAL COVERING INDEX") porque o export perdeu as chaves,
+        # e a busca por cultura de cada fazenda varria a tabela inteira.
+        con.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_faz_id ON fazendas(id)")
+        con.execute("CREATE INDEX IF NOT EXISTS idx_fc_faz_cult "
+                    "ON fazenda_culturas(fazenda_id, cultura_id)")
+        con.execute("CREATE INDEX IF NOT EXISTS idx_fp_faz ON fazenda_pessoas(fazenda_id)")
         # MIGRACAO CRITICA: o export "CREATE TABLE AS SELECT" perdeu a chave
         # primaria de pessoas — sem ela, lastrowid NAO corresponde ao campo id
         # e um contato novo apontaria para OUTRA pessoa (ou sumiria). Reconstroi
@@ -299,9 +308,19 @@ def atlas_boot():
         con.close()
 
 
+def _sem_acento(txt):
+    """MARIA JOSÉ -> MARIA JOSE (busca de família não pode depender de acento)."""
+    if txt is None:
+        return ""
+    return "".join(c for c in unicodedata.normalize("NFD", str(txt))
+                   if unicodedata.category(c) != "Mn").upper()
+
+
 def atlas_con():
     con = sqlite3.connect(ATLAS_DB, timeout=15)
     con.row_factory = sqlite3.Row
+    # busca por nome ignora acento e maiúscula (ROMUÁLDO acha ROMUALDO)
+    con.create_function("semacento", 1, _sem_acento)
     return con
 
 
@@ -1791,6 +1810,37 @@ def user_publico(u):
             "pode_mover": u.get("pode_mover", True)}
 
 
+POTENCIAL_PADRAO = []
+
+
+def potencial_regras():
+    """Regras de potencial comercial: 'a cada X ha da cultura Y vendo 1 Z de R$ W'.
+    Ficam nas settings do CRM (e nao no atlas.db) para sobreviverem a troca da base."""
+    rs = _db.get("settings", {}).get("potencial_regras")
+    if not isinstance(rs, list):
+        return []
+    limpas = []
+    for r in rs:
+        if not isinstance(r, dict):
+            continue
+        try:
+            ha = float(r.get("ha_por_unidade") or 0)
+            valor = float(r.get("valor_unidade") or 0)
+        except (TypeError, ValueError):
+            continue
+        cid = r.get("cultura_id")
+        if ha <= 0 or not str(cid).isdigit():
+            continue
+        limpas.append({"id": str(r.get("id") or "")[:40],
+                       "cultura_id": int(cid),
+                       "cultura": str(r.get("cultura") or "")[:60],
+                       "ha_por_unidade": ha,
+                       "produto": str(r.get("produto") or "Produto")[:60],
+                       "valor_unidade": valor,
+                       "ativa": r.get("ativa") is not False})
+    return limpas
+
+
 def settings_publico():
     """Config exposta ao painel — sem os segredos (tokens do webhook e do Chatwoot)."""
     st = _db.get("settings", {})
@@ -3033,6 +3083,174 @@ class Handler(BaseHTTPRequestHandler):
             contorno_delta = "fazenda_contorno_d" in tabs
             tem_contorno = contorno_delta or "fazenda_contorno" in tabs
 
+            if path == "/atlas-api/pessoas" and method == "GET":
+                # Quem são os donos: ranking por área, busca por nome/sobrenome
+                # (ignorando acento) e o resumo do grupo — é o cruzamento de
+                # "família": todo Romualdo/Francelin que tem fazenda.
+                # Com uma cultura escolhida, traz também quanto cada produtor
+                # tem dela (somando as fazendas dele) e o potencial em R$.
+                busca = ((qs.get("busca") or [""])[0]).strip()
+                ordenar = (qs.get("ordenar") or ["area"])[0]
+                try:
+                    pagina = max(1, int((qs.get("pagina") or ["1"])[0]))
+                except ValueError:
+                    pagina = 1
+                w, params = self._atlas_escopo(qs)
+                cond = [w]
+                cat = (qs.get("categoria") or [""])[0]
+                if cat:
+                    cond.append("f.categoria = ?")
+                    params = params + [cat]
+                if busca:
+                    # CPF/CNPJ só entra na busca quando o termo tem dígitos: um
+                    # valor "vazio" no LIKE casaria com todo mundo sem documento
+                    digitos = re.sub(r"\D", "", busca)
+                    if digitos:
+                        cond.append("(semacento(p.nome) LIKE semacento(?) OR REPLACE(REPLACE("
+                                    "REPLACE(COALESCE(p.documento,''),'.',''),'-',''),'/','') LIKE ?)")
+                        params = params + ["%" + busca + "%", "%" + digitos + "%"]
+                    else:
+                        cond.append("semacento(p.nome) LIKE semacento(?)")
+                        params = params + ["%" + busca + "%"]
+                wtudo = " AND ".join(cond)
+                base = ("FROM pessoas p JOIN fazenda_pessoas fp ON fp.pessoa_id = p.id "
+                        "JOIN fazendas f ON f.id = fp.fazenda_id "
+                        "LEFT JOIN municipios m ON m.id = f.municipio_id WHERE " + wtudo)
+                # área de UMA cultura na fazenda da linha (subconsulta por fazenda:
+                # juntar fazenda_culturas direto multiplicaria as linhas e a área)
+                col_cult = ("(SELECT COALESCE(SUM(fc.area_ha),0) FROM fazenda_culturas fc "
+                            "WHERE fc.fazenda_id = f.id AND fc.cultura_id = ? "
+                            "AND fc.safra = (SELECT MAX(safra) FROM fazenda_culturas))")
+                # quantas pessoas estao ligadas a mesma fazenda: em espolio e
+                # assentamento sao dezenas, e cada uma apareceria como dona da
+                # area inteira — quem vende precisa enxergar isso
+                col_soc = "(SELECT COUNT(*) FROM fazenda_pessoas x WHERE x.fazenda_id = f.id)"
+                msoc = (qs.get("max_socios") or [""])[0]
+                if msoc.isdigit() and int(msoc) > 0:
+                    cond.append(col_soc + " <= ?")
+                    params = params + [int(msoc)]
+                    wtudo = " AND ".join(cond)
+                    base = ("FROM pessoas p JOIN fazenda_pessoas fp ON fp.pessoa_id = p.id "
+                            "JOIN fazendas f ON f.id = fp.fazenda_id "
+                            "LEFT JOIN municipios m ON m.id = f.municipio_id WHERE " + wtudo)
+                sel, psel = "", []
+                cult = (qs.get("cultura") or [""])[0]
+                if cult.isdigit():
+                    sel += ", ROUND(SUM(" + col_cult + ")) AS area_cultura_ha"
+                    psel.append(int(cult))
+                regras = [r for r in potencial_regras() if r["ativa"]][:6]
+                for i, r in enumerate(regras):
+                    sel += ", SUM(" + col_cult + ") AS pot%d" % i
+                    psel.append(r["cultura_id"])
+                # mínimo da cultura somando TODAS as fazendas do produtor
+                # (o filtro de cima é por fazenda; este é por pessoa)
+                having = ""
+                phav = []
+                ctmin = (qs.get("cultura_total_min") or [""])[0]
+                if cult.isdigit() and ctmin:
+                    try:
+                        having = " HAVING SUM(" + col_cult + ") >= ?"
+                        phav = [int(cult), float(ctmin)]
+                    except ValueError:
+                        having, phav = "", []
+                ordem = {"area": "SUM(f.area_total_ha) DESC",
+                         "fazendas": "COUNT(DISTINCT f.id) DESC",
+                         "nome": "p.nome COLLATE NOCASE"}.get(ordenar, "SUM(f.area_total_ha) DESC")
+                if ordenar == "cultura" and cult.isdigit():
+                    ordem = "area_cultura_ha DESC"
+                rows = con.execute(
+                    "SELECT p.id, p.nome, p.documento, p.telefone, p.email, "
+                    "COUNT(DISTINCT f.id) AS fazendas, "
+                    "ROUND(SUM(f.area_total_ha)) AS area_ha, "
+                    "GROUP_CONCAT(DISTINCT m.nome) AS municipios, "
+                    "MAX(" + col_soc + ") AS socios_max" + sel + " " + base +
+                    " GROUP BY p.id" + having + " ORDER BY " + ordem + " LIMIT ? OFFSET ?",
+                    psel + params + phav + [25, (pagina - 1) * 25]).fetchall()
+                pessoas = []
+                for r in rows:
+                    d = dict(r)
+                    total, itens = 0.0, []
+                    for i, g in enumerate(regras):
+                        un = int((d.pop("pot%d" % i, 0) or 0) // g["ha_por_unidade"])
+                        if un > 0:
+                            total += un * g["valor_unidade"]
+                            itens.append({"produto": g["produto"], "unidades": un})
+                    d["potencial_rs"] = round(total, 2)
+                    d["potencial_itens"] = itens
+                    pessoas.append(d)
+                # Quando há mínimo por produtor, os totais só podem contar
+                # quem passou no corte — senão o resumo mostraria a região toda.
+                filtro_pes, pfil = "", []
+                if having:
+                    filtro_pes = " AND p.id IN (SELECT p.id " + base + " GROUP BY p.id" + having + ")"
+                    pfil = params + phav
+                # totais do grupo sobre fazendas DISTINTAS: uma fazenda com dois
+                # donos apareceria duas vezes e dobraria a área da família
+                res_p = con.execute("SELECT COUNT(DISTINCT p.id) AS pessoas " + base + filtro_pes,
+                                    params + pfil).fetchone()
+                colca = (", " + col_cult + " AS ca") if cult.isdigit() else ""
+                res_f = con.execute(
+                    "SELECT COUNT(*) AS fazendas, ROUND(SUM(area_total_ha)) AS area_ha"
+                    + (", ROUND(SUM(ca)) AS area_cultura_ha" if cult.isdigit() else "") +
+                    " FROM (SELECT DISTINCT f.id, f.area_total_ha" + colca + " " +
+                    base + filtro_pes + ")",
+                    (psel[:1] if cult.isdigit() else []) + params + pfil).fetchone()
+                resumo = dict(res_p or {})
+                resumo.update(dict(res_f or {}))
+                cidades = con.execute(
+                    "SELECT m.nome, COUNT(DISTINCT f.id) AS fazendas, "
+                    "COUNT(DISTINCT p.id) AS pessoas " + base + filtro_pes +
+                    " AND m.nome IS NOT NULL GROUP BY m.id "
+                    "ORDER BY COUNT(DISTINCT f.id) DESC LIMIT 12", params + pfil).fetchall()
+                # O Atlas so tem NOME de dono em parte dos municipios (o SICAR
+                # nao publica proprietario). Sem esse aviso, o painel vazio
+                # parece defeito quando na verdade e falta de dado na regiao.
+                cobertura = None
+                if not resumo.get("pessoas"):
+                    cob = con.execute(
+                        "SELECT COUNT(DISTINCT f.municipio_id) AS municipios, "
+                        "COUNT(DISTINCT fp.pessoa_id) AS pessoas "
+                        "FROM fazenda_pessoas fp JOIN fazendas f ON f.id = fp.fazenda_id").fetchone()
+                    cobertura = dict(cob) if cob else None
+                return self.send_json(200, {
+                    "pessoas": pessoas,
+                    "pagina": pagina, "por_pagina": 25,
+                    "resumo": resumo,
+                    "cidades": [dict(c) for c in cidades],
+                    "cobertura": cobertura,
+                    "busca": busca})
+
+            mpes = re.match(r"^/atlas-api/pessoa/(\d+)$", path)
+            if mpes and method == "GET":
+                pid = int(mpes.group(1))
+                p = con.execute("SELECT * FROM pessoas WHERE id = ?", [pid]).fetchone()
+                if not p:
+                    return self.send_json(404, {"erro": "não encontrada"})
+                faz = con.execute(
+                    "SELECT f.id, f.nome, f.codigo_car, f.area_total_ha, f.categoria, "
+                    "f.latitude, f.longitude, m.nome AS municipio, fp.relacao_fundiaria "
+                    "FROM fazenda_pessoas fp JOIN fazendas f ON f.id = fp.fazenda_id "
+                    "LEFT JOIN municipios m ON m.id = f.municipio_id "
+                    "WHERE fp.pessoa_id = ? ORDER BY f.area_total_ha DESC", [pid]).fetchall()
+                # outras pessoas com o mesmo sobrenome (possíveis parentes)
+                partes = [x for x in _sem_acento(p["nome"]).split() if len(x) > 3
+                          and x not in ("DOS", "DAS", "DER", "JUNIOR", "NETO", "FILHO", "SOBRINHO")]
+                sobrenome = partes[-1] if partes else ""
+                parentes = []
+                if sobrenome:
+                    parentes = con.execute(
+                        "SELECT p2.id, p2.nome, COUNT(DISTINCT f.id) AS fazendas, "
+                        "ROUND(SUM(f.area_total_ha)) AS area_ha "
+                        "FROM pessoas p2 JOIN fazenda_pessoas fp ON fp.pessoa_id = p2.id "
+                        "JOIN fazendas f ON f.id = fp.fazenda_id "
+                        "WHERE p2.id <> ? AND semacento(p2.nome) LIKE ? "
+                        "GROUP BY p2.id ORDER BY SUM(f.area_total_ha) DESC LIMIT 25",
+                        [pid, "%" + sobrenome + "%"]).fetchall()
+                return self.send_json(200, {"pessoa": dict(p),
+                                            "fazendas": [dict(f) for f in faz],
+                                            "sobrenome": sobrenome,
+                                            "parentes": [dict(x) for x in parentes]})
+
             if path == "/atlas-api/municipios" and method == "GET":
                 rows = con.execute(
                     """SELECT m.id, m.nome, m.uf, COUNT(f.id) AS fazendas,
@@ -3075,6 +3293,62 @@ class Handler(BaseHTTPRequestHandler):
                 con.execute("DELETE FROM territorios WHERE id = ?", [int(mter.group(1))])
                 con.commit()
                 return self.send_json(200, {"ok": True})
+
+            if path == "/atlas-api/potencial" and method == "GET":
+                # Potencial comercial do recorte: "a cada X ha da cultura Y
+                # vendo 1 Z de R$ W". Sao DUAS leituras, e as duas importam:
+                #  - imediato: a conta feita POR FAZENDA (quem sozinho ja
+                #    justifica a compra) — é a lista de quem visitar hoje;
+                #  - da regiao: a lavoura toda dividida pela regra — o tamanho
+                #    do mercado, incluindo quem só fecha via prestador/vizinho.
+                regras = [r for r in potencial_regras() if r["ativa"]]
+                w, p = self._atlas_escopo(qs)
+                safra = " AND fc.safra = (SELECT MAX(safra) FROM fazenda_culturas) AND "
+                itens, total_rs, total_reg, por_mun = [], 0.0, 0.0, {}
+                for r in regras:
+                    ha_un = r["ha_por_unidade"]
+                    row = con.execute(
+                        "SELECT COUNT(DISTINCT f.id) AS fazendas, COALESCE(SUM(fc.area_ha),0) AS area_ha, "
+                        "COALESCE(SUM(CAST(fc.area_ha / ? AS INTEGER)),0) AS unidades "
+                        "FROM fazenda_culturas fc JOIN fazendas f ON f.id = fc.fazenda_id "
+                        "WHERE fc.cultura_id = ?" + safra + w,
+                        [ha_un, r["cultura_id"]] + p).fetchone()
+                    un = int(row["unidades"] or 0)
+                    area = float(row["area_ha"] or 0)
+                    un_reg = int(area // ha_un)
+                    total_rs += un * r["valor_unidade"]
+                    total_reg += un_reg * r["valor_unidade"]
+                    itens.append({"id": r["id"], "produto": r["produto"], "cultura": r["cultura"],
+                                  "cultura_id": r["cultura_id"], "ha_por_unidade": ha_un,
+                                  "valor_unidade": r["valor_unidade"],
+                                  "unidades": un, "valor": un * r["valor_unidade"],
+                                  "unidades_regiao": un_reg,
+                                  "valor_regiao": un_reg * r["valor_unidade"],
+                                  "area_ha": round(area), "fazendas": row["fazendas"] or 0})
+                    for m in con.execute(
+                            "SELECT m.id, m.nome, COALESCE(SUM(fc.area_ha),0) AS area, "
+                            "COALESCE(SUM(CAST(fc.area_ha / ? AS INTEGER)),0) AS un "
+                            "FROM fazenda_culturas fc JOIN fazendas f ON f.id = fc.fazenda_id "
+                            "JOIN municipios m ON m.id = f.municipio_id "
+                            "WHERE fc.cultura_id = ?" + safra + w + " GROUP BY m.id",
+                            [ha_un, r["cultura_id"]] + p).fetchall():
+                        u, ureg = int(m["un"] or 0), int(float(m["area"] or 0) // ha_un)
+                        if u <= 0 and ureg <= 0:
+                            continue
+                        d = por_mun.setdefault(m["id"], {"id": m["id"], "nome": m["nome"],
+                                                         "valor": 0.0, "valor_regiao": 0.0,
+                                                         "itens": []})
+                        d["valor"] += u * r["valor_unidade"]
+                        d["valor_regiao"] += ureg * r["valor_unidade"]
+                        d["itens"].append({"produto": r["produto"], "unidades": u,
+                                           "unidades_regiao": ureg})
+                municipios = sorted(por_mun.values(),
+                                    key=lambda x: x["valor_regiao"], reverse=True)[:15]
+                return self.send_json(200, {"regras": itens,
+                                            "total_rs": round(total_rs, 2),
+                                            "total_regiao_rs": round(total_reg, 2),
+                                            "municipios": municipios,
+                                            "sem_regras": not regras})
 
             if path == "/atlas-api/culturas" and method == "GET":
                 w, p = self._atlas_escopo(qs)
@@ -3875,6 +4149,46 @@ class Handler(BaseHTTPRequestHandler):
                     st["curso_chatwoot_saudacao"] = str(body["curso_chatwoot_saudacao"] or "").strip()[:2000]
                 save_db()
                 return self.send_json(200, {"settings": settings_publico()})
+
+        # ---- Regras de potencial comercial (a cada X ha de tal cultura = 1 venda) ----
+        if path == "/api/potencial" and method == "GET":
+            return self.send_json(200, {"regras": potencial_regras()})
+
+        if path == "/api/potencial" and method == "POST":
+            if not gestor:
+                return self.send_json(403, {"error": "Só gerente/administrador define o potencial"})
+            try:
+                body = self.read_body()
+            except Exception:
+                return self.send_json(400, {"error": "Corpo invalido"})
+            entradas = body.get("regras")
+            if not isinstance(entradas, list) or len(entradas) > 40:
+                return self.send_json(400, {"error": "Envie até 40 regras"})
+            limpas = []
+            for r in entradas:
+                if not isinstance(r, dict):
+                    continue
+                try:
+                    ha = float(r.get("ha_por_unidade") or 0)
+                    valor = float(r.get("valor_unidade") or 0)
+                except (TypeError, ValueError):
+                    return self.send_json(400, {"error": "Área e valor precisam ser números"})
+                cid = str(r.get("cultura_id") or "")
+                if not cid.isdigit() or ha <= 0:
+                    return self.send_json(400, {"error": "Escolha a cultura e uma área maior que zero"})
+                if valor < 0 or valor > 1e12 or ha > 1e7:
+                    return self.send_json(400, {"error": "Valores fora do razoável"})
+                limpas.append({"id": str(r.get("id") or "").strip()[:40] or ("p" + secrets.token_hex(4)),
+                               "cultura_id": int(cid),
+                               "cultura": str(r.get("cultura") or "").strip()[:60],
+                               "ha_por_unidade": ha,
+                               "produto": str(r.get("produto") or "").strip()[:60] or "Produto",
+                               "valor_unidade": valor,
+                               "ativa": r.get("ativa") is not False})
+            with _lock:
+                _db.setdefault("settings", {})["potencial_regras"] = limpas
+                save_db()
+            return self.send_json(200, {"regras": potencial_regras()})
 
         # ---- Etapas do funil: renomear qualquer coluna, criar/excluir (gestor) ----
         if path == "/api/etapas" and method == "POST":

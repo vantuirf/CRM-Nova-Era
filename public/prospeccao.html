@@ -76,6 +76,42 @@
   .form-inline{display:grid;gap:6px;margin-top:8px}
   .form-inline input,.form-inline textarea{padding:8px;border:1px solid var(--borda);border-radius:8px;font-size:13.5px}
   .form-inline button{padding:8px;border:none;border-radius:8px;background:var(--verde);color:#fff;font-weight:600;cursor:pointer}
+  .familia-box{margin:0 14px 12px;padding:12px 14px;border-radius:10px;
+               background:#eef7ff;border:1px solid #cfe4fa;font-size:13.5px;color:#12325c}
+  .familia-box b{font-size:16px}
+  .familia-box .cidades{margin-top:6px;color:#4a6b8a;font-size:12.5px}
+  .socios{background:#fff4e6;border:1px solid #f0dcc0;color:#8a5a00;border-radius:20px;
+    padding:2px 8px;font-size:12px;white-space:nowrap}
+  .dica-cult{margin:0 14px 10px;padding:8px 12px;border-radius:8px;background:#fff8e6;
+    border:1px solid #f2dfae;color:#7a5c00;font-size:12.5px}
+  .bt-mini{float:right;margin-top:-3px;background:#eef4fb;border:1px solid #cfe0f2;color:#2a5f92;
+    border-radius:8px;padding:4px 10px;font-size:12px;cursor:pointer}
+  .pot-total{padding:14px;font-size:15px;color:#1f2d3a}
+  .pot-dois{display:flex;flex-wrap:wrap;gap:20px}
+  .pot-dois > div{flex:1 1 240px}
+  .pot-dois b{font-size:26px;color:#0f7b3f;display:block;line-height:1.2}
+  .pot-dois span{color:#5a6b7a;font-size:12.5px;display:block;margin-top:2px}
+  .pot-regras{display:flex;flex-wrap:wrap;gap:10px;padding:0 14px 12px}
+  .pot-card{flex:1 1 210px;border:1px solid var(--borda);border-radius:10px;padding:10px 12px;background:#fafcff}
+  .pot-card b{display:block;font-size:15px;color:#1f2d3a}
+  .pot-card .un{font-size:22px;font-weight:700;color:#0f7b3f}
+  .pot-card small{color:#7a8794;display:block;margin-top:2px}
+  .pot-editor{padding:0 14px 14px;border-top:1px dashed var(--borda);margin-top:6px}
+  .pot-editor .dica{color:#5a6b7a;font-size:12.5px;margin:10px 0}
+  .tab-regras input,.tab-regras select{width:100%;padding:6px 8px;border:1px solid var(--borda);
+    border-radius:7px;font-size:13px;background:#fff}
+  .tab-regras td{padding:4px 6px}
+  .acoes-pot{display:flex;gap:8px;align-items:center;margin-top:10px}
+  .bt-sec{background:#eef4fb;border:1px solid #cfe0f2;color:#2a5f92;border-radius:8px;
+    padding:7px 12px;font-size:13px;cursor:pointer}
+  .bt-pri{background:#0f7b3f;border:1px solid #0f7b3f;color:#fff;border-radius:8px;
+    padding:7px 14px;font-size:13px;cursor:pointer}
+  .bt-x{background:#fff0f0;border:1px solid #f3cfcf;color:#a33;border-radius:7px;
+    padding:5px 9px;cursor:pointer}
+  .pot-msg{color:#0f7b3f;font-size:12.5px}
+  .fam-chip{display:inline-block;background:#fff;border:1px solid #cfe4fa;border-radius:20px;
+            padding:2px 9px;margin:3px 4px 0 0;font-size:12px}
+  td.num,th.num{text-align:right}
   #fundo{position:fixed;inset:0;background:rgba(0,0,0,.25);display:none;z-index:1500}
   #fundo.on{display:block}
 </style>
@@ -158,6 +194,74 @@
           <button id="pgAnt">‹</button><span id="pgInfo"></span><button id="pgProx">›</button>
         </div>
       </div>
+
+      <div class="painel mapa-painel">
+        <h3>👥 Proprietários <small style="color:#9aa6b2;font-weight:400">(maiores detentores de terra e busca por família)</small></h3>
+        <div class="filtros">
+          <input id="buscaPes" placeholder="Nome, sobrenome ou CPF/CNPJ — ex.: Romualdo, Francelin…">
+          <select id="ordPes" title="Como ordenar a lista">
+            <option value="area">Maior área total</option>
+            <option value="fazendas">Mais fazendas</option>
+            <option value="cultura">Maior área da cultura escolhida</option>
+            <option value="nome">Nome (A-Z)</option>
+          </select>
+          <select id="fSocios" title="Fazendas de espólio/assentamento têm dezenas de pessoas ligadas — cada uma aparece como dona da área toda">
+            <option value="">Com ou sem sócios</option>
+            <option value="1">Só dono único</option>
+            <option value="3">Até 3 pessoas na fazenda</option>
+            <option value="10">Até 10 pessoas na fazenda</option>
+          </select>
+          <select id="fCultPes" title="Mínimo da cultura somando TODAS as fazendas do produtor">
+            <option value="">Qualquer área da cultura</option>
+            <option value="50">Produtor com 50+ ha</option>
+            <option value="100">Produtor com 100+ ha</option>
+            <option value="200">Produtor com 200+ ha</option>
+            <option value="500">Produtor com 500+ ha</option>
+            <option value="1000">Produtor com 1.000+ ha</option>
+            <option value="3000">Produtor com 3.000+ ha</option>
+          </select>
+        </div>
+        <div id="avisoCultPes" class="dica-cult" hidden></div>
+        <div id="resumoPes" class="familia-box" hidden></div>
+        <table>
+          <thead><tr><th>Proprietário</th><th class="num">Fazendas</th><th class="num">Área total (ha)</th>
+            <th class="num" id="thCultPes" hidden>Cultura (ha)</th>
+            <th class="num" title="Pessoas ligadas à mesma fazenda">Sócios</th>
+            <th class="num" id="thPotPes" hidden>Potencial</th>
+            <th>Onde está</th></tr></thead>
+          <tbody id="tbPes"></tbody>
+        </table>
+        <div class="paginacao">
+          <button id="pgPesAnt">‹</button><span id="pgPesInfo"></span><button id="pgPesProx">›</button>
+        </div>
+      </div>
+
+      <div class="painel mapa-painel">
+        <h3>💰 Potencial comercial da região
+          <small style="color:#9aa6b2;font-weight:400">(quanto dá para vender no recorte selecionado)</small>
+          <button id="btEditarPot" class="bt-mini" hidden>⚙️ Editar regras</button>
+        </h3>
+        <div id="potResumo" class="pot-total"></div>
+        <div id="potRegras" class="pot-regras"></div>
+        <div id="potEditor" class="pot-editor" hidden>
+          <p class="dica">Uma linha por produto: <b>a cada X ha</b> da cultura escolhida você vende
+            <b>1 unidade</b> daquele produto pelo valor informado.</p>
+          <table class="tab-regras">
+            <thead><tr><th>Cultura</th><th class="num">A cada (ha)</th><th>Produto</th>
+              <th class="num">Valor da unidade (R$)</th><th></th></tr></thead>
+            <tbody id="tbRegras"></tbody>
+          </table>
+          <div class="acoes-pot">
+            <button id="btAddRegra" class="bt-sec">+ Nova regra</button>
+            <button id="btSalvarPot" class="bt-pri">Salvar regras</button>
+            <span id="potMsg" class="pot-msg"></span>
+          </div>
+        </div>
+        <table>
+          <thead><tr><th>Município</th><th class="num" title="Ordenado pelo mercado da região">Imediato / região ↓</th><th>O que dá para vender</th></tr></thead>
+          <tbody id="tbPotMun"></tbody>
+        </table>
+      </div>
     </div>
   </main>
 </div>
@@ -215,6 +319,7 @@ function filtrarCultura(id){
 
 async function carregarListaCulturas(){
   const d = await api("/atlas-api/culturas");   // lista geral, para o filtro
+  potCulturas = d.culturas.map(c => ({id: c.id, nome: c.nome}));
   document.getElementById("fCult").innerHTML =
     `<option value="">Todas as culturas</option>` +
     d.culturas.map(c => `<option value="${c.id}">${esc(c.nome)}</option>`).join("");
@@ -645,7 +750,8 @@ async function carregarMapa(){
 }
 
 function atualizarTudo(){ carregarResumo(); carregarFazendas(); carregarMapa();
-                          carregarCulturas(); carregarLimite(); }
+                          carregarCulturas(); carregarLimite();
+                          carregarPotencial().catch(()=>{}).then(carregarPessoas); }
 
 async function abrirFazenda(id){
   const d = await api("/atlas-api/fazenda/"+id);
@@ -731,6 +837,9 @@ async function carregarUsuario(){
     usuarioCRM = u.user || u;
     if (usuarioCRM && usuarioCRM.nome)
       document.getElementById("usuarioLogado").textContent = usuarioCRM.nome + " · " + (usuarioCRM.papel||"");
+    // as regras de potencial sao definidas pelo gestor; vendedor so consulta
+    if (usuarioCRM && ["admin","gerente"].includes(usuarioCRM.papel))
+      document.getElementById("btEditarPot").hidden = false;
   }catch(e){ /* fora do CRM, segue sem identificar */ }
 }
 
@@ -840,6 +949,243 @@ async function novoRegistro(id){
     headers:{"Content-Type":"application/json"}, body: JSON.stringify({texto})});
   abrirFazenda(id);
 }
+
+/* ---------- 👥 Proprietários: ranking, busca por família e ficha ---------- */
+let pagPes = 1, buscaPesTimer;
+
+async function carregarPessoas(){
+  const ps = escopo({pagina: pagPes});
+  const b = document.getElementById("buscaPes").value.trim();
+  const cat = document.getElementById("fCat").value;
+  if (b) ps.set("busca", b);
+  if (cat) ps.set("categoria", cat);
+  ps.set("ordenar", document.getElementById("ordPes").value);
+  // mínimo da cultura somando as fazendas do produtor (só faz sentido com cultura escolhida)
+  const selCult = document.getElementById("fCult");
+  const temCult = !!selCult.value;
+  const nomeCult = temCult ? selCult.options[selCult.selectedIndex].text : "";
+  const minPes = document.getElementById("fCultPes").value;
+  if (temCult && minPes) ps.set("cultura_total_min", minPes);
+  const soc = document.getElementById("fSocios").value;
+  if (soc) ps.set("max_socios", soc);
+  const aviso = document.getElementById("avisoCultPes");
+  if (!temCult && minPes){
+    aviso.hidden = false;
+    aviso.textContent = "Escolha uma cultura no filtro das Fazendas (acima) para usar o mínimo por produtor.";
+  } else if (temCult){
+    aviso.hidden = false;
+    aviso.textContent = minPes
+      ? `Mostrando produtores com ${fmt(minPes)}+ ha de ${nomeCult} somando todas as fazendas dele.`
+      : `Coluna "${nomeCult}" = quanto cada produtor tem dessa cultura no recorte.`;
+  } else aviso.hidden = true;
+
+  const d = await api("/atlas-api/pessoas?" + ps);
+  const r = d.resumo || {};
+  const cx = document.getElementById("resumoPes");
+  const chips = (d.cidades && d.cidades.length)
+    ? `<div class="cidades">Onde estão: ` + d.cidades.map(c =>
+        `<span class="fam-chip">${esc(c.nome)} · ${fmt(c.fazendas)} faz.</span>`).join("") + `</div>`
+    : "";
+  if (b && r.pessoas){
+    // este é o "cruzamento de família": todo mundo com aquele nome que tem terra
+    cx.hidden = false;
+    cx.innerHTML =
+      `<b>${fmt(r.pessoas)} pessoa(s) com "${esc(b)}"</b> — ${fmt(r.fazendas)} fazendas · ` +
+      `${fmt(r.area_ha)} ha no total` +
+      (temCult && r.area_cultura_ha != null ? ` · ${fmt(r.area_cultura_ha)} ha de ${esc(nomeCult)}` : "") +
+      chips;
+  } else if (temCult && minPes && r.pessoas){
+    // lista de trabalho: quantos produtores atendem ao corte de área
+    cx.hidden = false;
+    cx.innerHTML =
+      `<b>${fmt(r.pessoas)} produtor(es) com ${fmt(minPes)}+ ha de ${esc(nomeCult)}</b> — ` +
+      `${fmt(r.fazendas)} fazendas · ${fmt(r.area_cultura_ha)} ha de ${esc(nomeCult)}` + chips;
+  } else cx.hidden = true;
+
+  document.getElementById("thCultPes").hidden = !temCult;
+  document.getElementById("thPotPes").hidden = !potTemRegras;
+  const colspan = 5 + (temCult ? 1 : 0) + (potTemRegras ? 1 : 0);
+  document.getElementById("tbPes").innerHTML = d.pessoas.length
+    ? d.pessoas.map(p => `
+      <tr class="linha" onclick="abrirPessoa(${p.id})">
+        <td>${esc(p.nome)}${p.telefone ? `<br><small style="color:#7a8794">${esc(p.telefone)}</small>` : ""}</td>
+        <td class="num">${fmt(p.fazendas)}</td>
+        <td class="num"><b>${fmt(p.area_ha)}</b></td>
+        ${temCult ? `<td class="num">${fmt(p.area_cultura_ha || 0)}</td>` : ""}
+        <td class="num">${(p.socios_max || 1) > 1
+            ? `<span class="socios" title="A maior fazenda dele tem ${fmt(p.socios_max)} pessoas ligadas — a área não é toda dele">👥 ${fmt(p.socios_max)}</span>`
+            : `<small style="color:#9aa6b2">único</small>`}</td>
+        ${potTemRegras ? `<td class="num" title="${esc((p.potencial_itens||[]).map(i => i.unidades + "x " + i.produto).join(", "))}">
+            ${p.potencial_rs ? "<b style='color:#0f7b3f'>" + dinheiro(p.potencial_rs) + "</b>" : "–"}</td>` : ""}
+        <td><small style="color:#7a8794">${esc((p.municipios||"").split(",").slice(0,3).join(", "))}</small></td>
+      </tr>`).join("")
+    : `<tr><td colspan="${colspan}" style="color:#9aa6b2">${
+        d.cobertura && d.cobertura.municipios
+          ? `O Atlas ainda não tem <b>nome de proprietário</b> nesta região. ` +
+            `Hoje há ${fmt(d.cobertura.pessoas)} proprietários mapeados em ${fmt(d.cobertura.municipios)} municípios ` +
+            `— nos demais, trabalhe pelo mapa e pela lista de fazendas.`
+          : "Nenhum proprietário encontrado neste recorte."}</td></tr>`;
+  document.getElementById("pgPesInfo").textContent =
+    `${d.pagina} — ${fmt(r.pessoas || 0)} proprietário(s)`;
+  document.getElementById("pgPesAnt").disabled = d.pagina <= 1;
+  document.getElementById("pgPesProx").disabled = d.pessoas.length < d.por_pagina;
+}
+
+/* ---------- 💰 Potencial comercial ---------- */
+let potRegras = [], potTemRegras = false, potCulturas = [];
+const dinheiro = v => "R$ " + Number(v || 0).toLocaleString("pt-BR", {maximumFractionDigits: 0});
+
+async function carregarPotencial(){
+  const d = await api("/atlas-api/potencial?" + escopo());
+  potTemRegras = !d.sem_regras;
+  const res = document.getElementById("potResumo");
+  if (d.sem_regras){
+    res.innerHTML = `<span style="color:#7a8794">Nenhuma regra cadastrada ainda. ` +
+      `Clique em <b>⚙️ Editar regras</b> e diga, por exemplo: a cada 500 ha de soja, ` +
+      `1 drone T70P de R$ 180.000.</span>`;
+    document.getElementById("potRegras").innerHTML = "";
+    document.getElementById("tbPotMun").innerHTML = "";
+    return;
+  }
+  res.innerHTML =
+    `<div class="pot-dois">
+       <div><b>${dinheiro(d.total_rs)}</b>
+         <span>potencial <u>imediato</u> — só de quem, sozinho, já tem lavoura para o produto</span></div>
+       <div><b style="color:#1e63a8">${dinheiro(d.total_regiao_rs)}</b>
+         <span>mercado <u>da região</u> — toda a lavoura do recorte dividida pela regra</span></div>
+     </div>`;
+  document.getElementById("potRegras").innerHTML = d.regras.map(r => `
+    <div class="pot-card">
+      <span class="un">${fmt(r.unidades)}</span>
+      <b>${esc(r.produto)}</b>
+      <small>${fmt(r.area_ha)} ha de ${esc(r.cultura)} · 1 a cada ${fmt(r.ha_por_unidade)} ha</small>
+      <small><b>${dinheiro(r.valor)}</b> imediato</small>
+      <small style="color:#1e63a8">${fmt(r.unidades_regiao)} un · ${dinheiro(r.valor_regiao)} na região</small>
+    </div>`).join("");
+  document.getElementById("tbPotMun").innerHTML = d.municipios.length
+    ? d.municipios.map(m => `
+      <tr class="linha" onclick="irParaMunicipio(${m.id})" title="Clique para filtrar a prospecção por este município">
+        <td>${esc(m.nome)}</td>
+        <td class="num"><b style="color:#0f7b3f">${dinheiro(m.valor)}</b>
+          <br><small style="color:#1e63a8">${dinheiro(m.valor_regiao)} na região</small></td>
+        <td><small style="color:#7a8794">${esc(m.itens.map(i =>
+              fmt(i.unidades) + "x " + i.produto + (i.unidades_regiao > i.unidades
+                ? " (até " + fmt(i.unidades_regiao) + ")" : "")).join(" · "))}</small></td>
+      </tr>`).join("")
+    : `<tr><td colspan="3" style="color:#9aa6b2">Sem lavoura suficiente para as regras neste recorte.</td></tr>`;
+}
+
+function irParaMunicipio(id){
+  const el = document.querySelector(`#listaMun .mun[data-id="${id}"]`);
+  if (el){ el.click(); el.scrollIntoView({block: "center"}); }
+}
+
+async function carregarRegras(){
+  if (!potCulturas.length) await carregarListaCulturas();   // sem isso o select fica vazio
+  const d = await api("/api/potencial");
+  potRegras = d.regras || [];
+  desenharRegras();
+}
+
+function desenharRegras(){
+  const ops = c => potCulturas.map(x =>
+    `<option value="${x.id}" ${String(x.id) === String(c) ? "selected" : ""}>${esc(x.nome)}</option>`).join("");
+  document.getElementById("tbRegras").innerHTML = potRegras.map((r, i) => `
+    <tr>
+      <td><select data-i="${i}" data-c="cultura_id">${ops(r.cultura_id)}</select></td>
+      <td><input data-i="${i}" data-c="ha_por_unidade" type="number" min="1" step="1" value="${Number(r.ha_por_unidade)||0}"></td>
+      <td><input data-i="${i}" data-c="produto" maxlength="60" value="${esc(r.produto)}"></td>
+      <td><input data-i="${i}" data-c="valor_unidade" type="number" min="0" step="1000" value="${Number(r.valor_unidade)||0}"></td>
+      <td><button class="bt-x" data-rm="${i}" title="Excluir">×</button></td>
+    </tr>`).join("") ||
+    `<tr><td colspan="5" style="color:#9aa6b2">Nenhuma regra. Clique em "+ Nova regra".</td></tr>`;
+  document.querySelectorAll("#tbRegras [data-c]").forEach(el => {
+    el.onchange = () => {
+      const r = potRegras[+el.dataset.i], campo = el.dataset.c;
+      r[campo] = (campo === "produto") ? el.value : Number(el.value);
+      if (campo === "cultura_id"){
+        const c = potCulturas.find(x => String(x.id) === String(el.value));
+        r.cultura = c ? c.nome : "";
+      }
+    };
+  });
+  document.querySelectorAll("#tbRegras [data-rm]").forEach(el => {
+    el.onclick = () => { potRegras.splice(+el.dataset.rm, 1); desenharRegras(); };
+  });
+}
+
+async function salvarRegras(){
+  const msg = document.getElementById("potMsg");
+  for (const r of potRegras){
+    if (!r.cultura_id || !(r.ha_por_unidade > 0)){
+      msg.style.color = "#a33";
+      msg.textContent = "Cada regra precisa de uma cultura e de uma área maior que zero.";
+      return;
+    }
+  }
+  const d = await api("/api/potencial", {method: "POST",
+    headers: {"Content-Type": "application/json"}, body: JSON.stringify({regras: potRegras})});
+  if (d.error){ msg.style.color = "#a33"; msg.textContent = d.error; return; }
+  potRegras = d.regras || [];
+  msg.style.color = "#0f7b3f";
+  msg.textContent = "Regras salvas.";
+  setTimeout(() => msg.textContent = "", 2500);
+  desenharRegras();
+  await carregarPotencial();
+  carregarPessoas();
+}
+
+async function abrirPessoa(id){
+  const d = await api("/atlas-api/pessoa/" + id);
+  const p = d.pessoa;
+  const totalHa = d.fazendas.reduce((a,f) => a + (f.area_total_ha||0), 0);
+  document.getElementById("gNome").textContent = p.nome;
+  document.getElementById("gCar").textContent = p.documento || "";
+  document.getElementById("gCorpo").innerHTML = `
+    <div class="campo"><b>Contato</b>${esc(p.telefone||"—")} ${esc(p.email||"")}</div>
+    <div class="campo"><b>Total</b>${fmt(d.fazendas.length)} fazenda(s) · ${fmt(Math.round(totalHa))} ha</div>
+    <div class="secao"><h4>Fazendas</h4>
+      ${d.fazendas.map(f => `
+        <div class="pessoa" style="cursor:pointer" onclick="abrirFazenda(${f.id})">
+          <b>${esc(f.nome)}</b> — ${fmt(Math.round(f.area_total_ha||0))} ha
+          <br><small>${esc(f.municipio||"—")} · ${esc(f.relacao_fundiaria||"proprietário")}
+          · <span class="tag ${f.categoria}">${esc((f.categoria||"").replace("_"," "))}</span></small>
+        </div>`).join("") || "<small>Nenhuma fazenda vinculada.</small>"}
+    </div>
+    ${d.parentes && d.parentes.length ? `
+    <div class="secao"><h4>Possíveis parentes — "${esc(d.sobrenome)}"</h4>
+      ${d.parentes.map(x => `
+        <div class="pessoa" style="cursor:pointer" onclick="abrirPessoa(${x.id})">
+          <b>${esc(x.nome)}</b><br><small>${fmt(x.fazendas)} fazenda(s) · ${fmt(x.area_ha)} ha</small>
+        </div>`).join("")}
+    </div>` : ""}`;
+  document.getElementById("gaveta").classList.add("aberta");
+  document.getElementById("fundo").classList.add("on");
+}
+
+document.getElementById("buscaPes").oninput = () => {
+  clearTimeout(buscaPesTimer);
+  buscaPesTimer = setTimeout(() => { pagPes = 1; carregarPessoas(); }, 350);
+};
+document.getElementById("ordPes").onchange = () => { pagPes = 1; carregarPessoas(); };
+document.getElementById("fCultPes").onchange = () => { pagPes = 1; carregarPessoas(); };
+document.getElementById("fSocios").onchange = () => { pagPes = 1; carregarPessoas(); };
+document.getElementById("btEditarPot").onclick = () => {
+  const ed = document.getElementById("potEditor");
+  ed.hidden = !ed.hidden;
+  if (!ed.hidden) carregarRegras();
+};
+document.getElementById("btAddRegra").onclick = async () => {
+  if (!potCulturas.length) await carregarListaCulturas();
+  const c = potCulturas[0];
+  if (!c){ document.getElementById("potMsg").textContent = "Culturas ainda carregando…"; return; }
+  potRegras.push({cultura_id: c.id, cultura: c.nome, ha_por_unidade: 500,
+                  produto: "", valor_unidade: 0, ativa: true});
+  desenharRegras();
+};
+document.getElementById("btSalvarPot").onclick = salvarRegras;
+document.getElementById("pgPesAnt").onclick = () => { pagPes--; carregarPessoas(); };
+document.getElementById("pgPesProx").onclick = () => { pagPes++; carregarPessoas(); };
 
 document.getElementById("busca").oninput = () => { pagina = 1; carregarFazendas(); };
 document.getElementById("fCat").onchange = () => { pagina = 1; atualizarTudo(); };
