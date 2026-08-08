@@ -3023,6 +3023,35 @@ class Handler(BaseHTTPRequestHandler):
                     " ORDER BY f.area_total_ha DESC LIMIT 3000", params).fetchall()
                 return self.send_json(200, [dict(r) for r in rows])
 
+            if path == "/atlas-api/limite" and method == "GET":
+                # contorno (limite) dos municipios do recorte atual — a linha
+                # que delimita a cidade selecionada ou o territorio inteiro
+                if not con.execute("SELECT 1 FROM sqlite_master WHERE type='table' "
+                                   "AND name='municipio_contorno'").fetchone():
+                    return self.send_json(200, {"limites": [], "sem_limites": True})
+                mun = (qs.get("municipio_id") or [""])[0]
+                ter = (qs.get("territorio_id") or [""])[0]
+                if ter.isdigit():
+                    rows = con.execute(
+                        "SELECT m.nome, c.geojson FROM municipio_contorno c "
+                        "JOIN municipios m ON m.id = c.municipio_id "
+                        "WHERE c.municipio_id IN (SELECT municipio_id FROM "
+                        "territorio_municipios WHERE territorio_id = ?)", [int(ter)]).fetchall()
+                elif mun.isdigit():
+                    rows = con.execute(
+                        "SELECT m.nome, c.geojson FROM municipio_contorno c "
+                        "JOIN municipios m ON m.id = c.municipio_id "
+                        "WHERE c.municipio_id = ?", [int(mun)]).fetchall()
+                else:
+                    return self.send_json(200, {"limites": []})   # Goiás inteiro: sem linha
+                saida = []
+                for r in rows:
+                    try:
+                        saida.append({"nome": r["nome"], "aneis": json.loads(r["geojson"])})
+                    except Exception:
+                        continue
+                return self.send_json(200, {"limites": saida})
+
             if path == "/atlas-api/mapa-municipios" and method == "GET":
                 # visao de longe: UMA bolha por municipio com a contagem —
                 # assim o mapa mostra TODAS as fazendas, nao so as 3.000 maiores

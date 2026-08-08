@@ -456,8 +456,29 @@ function corDa(cat){
 
 /* De LONGE mostra uma bolha por município com a contagem (assim TODAS as
    fazendas aparecem, não só as 3.000 maiores); de perto, os contornos. */
-let camadaMunicipios, bboxRecorte = null;   // bbox das fazendas do recorte atual
+let camadaMunicipios, camadaLimite, bboxRecorte = null;   // bbox das fazendas do recorte atual
 const ZOOM_PONTOS = 9;        // daqui até ZOOM_CONTORNOS: pontos individuais
+
+/* Contorno (limite) da cidade/território escolhido — linha amarela sobre o
+   satélite, para a equipe enxergar onde a área de atuação começa e termina. */
+async function carregarLimite(){
+  const ps = new URLSearchParams();
+  if (terAtivo) ps.set("territorio_id", terAtivo);
+  else if (munAtivo) ps.set("municipio_id", munAtivo);
+  if (camadaLimite){ camadaLimite.remove(); camadaLimite = null; }
+  if (![...ps].length) return;             // Goiás inteiro: sem linha
+  const d = await api("/atlas-api/limite?" + ps);
+  if (!d.limites || !d.limites.length) return;
+  camadaLimite = L.layerGroup(d.limites.map(m =>
+    // ciano: cor que NENHUMA categoria de fazenda usa (verde/dourado/vermelho/
+    // amarelo), então o limite da cidade nunca se confunde com as propriedades
+    L.polygon(m.aneis.map(a => a.map(([x,y]) => [y,x])), {
+      color:"#00e5ff", weight:4, opacity:1, fill:false,
+      dashArray:"10 6", interactive:false         // não atrapalha o clique nas fazendas
+    }).bindTooltip(esc(m.nome), {sticky:true})
+  )).addTo(mapa);
+  camadaLimite.bringToBack && camadaLimite.bringToBack();
+}
 
 async function carregarBolhas(){
   const ps = escopo();
@@ -608,7 +629,8 @@ async function carregarMapa(){
   }
 }
 
-function atualizarTudo(){ carregarResumo(); carregarFazendas(); carregarMapa(); carregarCulturas(); }
+function atualizarTudo(){ carregarResumo(); carregarFazendas(); carregarMapa();
+                          carregarCulturas(); carregarLimite(); }
 
 async function abrirFazenda(id){
   const d = await api("/atlas-api/fazenda/"+id);
