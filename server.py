@@ -104,24 +104,114 @@ def _atlas_schema_equipe(con):
 
 
 def _atlas_migra_edicoes(antigo, novo):
-    """Leva as edicoes da equipe do banco ANTIGO para a base NOVA e mantem as
-    categorias que a equipe marcou (cliente/lead/descartada)."""
+    """Leva o trabalho da equipe do banco ANTIGO para a base NOVA.
+
+    Duas regras que a versao anterior quebrava:
+    1. NUNCA apagar o que ja vem na base nova (pessoas/vinculos do enriquecimento
+       sao 22 mil linhas — o DELETE anterior jogava tudo fora).
+    2. NUNCA confiar em id entre bases diferentes: fazenda e municipio sao
+       religados pelo codigo do CAR / codigo do IBGE, que nao mudam. Linha cujo
+       destino nao existe mais na base nova e descartada (e contada no aviso)."""
     con = sqlite3.connect(novo)
     _atlas_schema_equipe(con)   # as tabelas da equipe precisam existir aqui
+    # sem esta chave o "INSERT OR IGNORE" nao ignora nada e duplica vinculos
+    try:
+        con.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_fp_unico "
+                    "ON fazenda_pessoas(fazenda_id, pessoa_id)")
+    except sqlite3.Error:
+        pass
     con.execute("ATTACH ? AS velho", [antigo])
     tabs_velho = {r[0] for r in con.execute(
         "SELECT name FROM velho.sqlite_master WHERE type='table'").fetchall()}
-    for t in ATLAS_TABELAS_EQUIPE:
-        if t not in tabs_velho:
-            continue
-        cols_novo = [c[1] for c in con.execute("PRAGMA table_info(%s)" % t).fetchall()]
-        cols_velho = [c[1] for c in con.execute("PRAGMA velho.table_info(%s)" % t).fetchall()]
-        cols = [c for c in cols_novo if c in cols_velho]
-        if not cols:
-            continue
+    perdidas = 0
+
+    def de_para(tabela, chave):
+        """id do banco velho -> id do banco novo, casando pela chave estavel."""
+        if tabela not in tabs_velho:
+            return {}
+        novos = {str(k).strip(): i for i, k in con.execute(
+            "SELECT id, %s FROM %s WHERE %s IS NOT NULL" % (chave, tabela, chave)).fetchall()}
+        mapa = {}
+        for i, k in con.execute(
+                "SELECT id, %s FROM velho.%s WHERE %s IS NOT NULL" % (chave, tabela, chave)).fetchall():
+            j = novos.get(str(k).strip())
+            if j is not None:
+                mapa[i] = j
+        return mapa
+
+    faz = de_para("fazendas", "codigo_car")
+    mun = de_para("municipios", "codigo_ibge")
+
+    # --- pessoas: mantem as da base nova; traz as que so existem no banco velho
+    if "pessoas" in tabs_velho:
+        cols_n = [c[1] for c in con.execute("PRAGMA table_info(pessoas)").fetchall()]
+        cols_v = [c[1] for c in con.execute("PRAGMA velho.table_info(pessoas)").fetchall()]
+        cols = [c for c in cols_n if c in cols_v and c != "id"]
         lista = ", ".join(cols)
-        con.execute("DELETE FROM %s" % t)  # a base nova vem com o import antigo
-        con.execute("INSERT OR IGNORE INTO %s (%s) SELECT %s FROM velho.%s" % (t, lista, lista, t))
+        prox = (con.execute("SELECT COALESCE(MAX(id),0) FROM pessoas").fetchone()[0] or 0) + 1
+        pes = {}
+        for linha in con.execute("SELECT id, %s FROM velho.pessoas" % lista).fetchall():
+            vid, dados = linha[0], linha[1:]
+            achou = con.execute(
+                "SELECT id FROM pessoas WHERE (documento IS NOT NULL AND documento <> '' "
+                "AND documento = ?) OR UPPER(nome) = UPPER(?)",
+                [dados[cols.index("documento")] if "documento" in cols else None,
+                 dados[cols.index("nome")] if "nome" in cols else ""]).fetchone()
+            if achou:
+                pes[vid] = achou[0]
+                # completa o que faltava (telefone/e-mail que a equipe cadastrou)
+                for campo in ("telefone", "email", "documento"):
+                    if campo in cols:
+                        con.execute("UPDATE pessoas SET %s = COALESCE(%s, ?) WHERE id = ?" % (campo, campo),
+                                    [dados[cols.index(campo)], achou[0]])
+            else:
+                con.execute("INSERT INTO pessoas (id, %s) VALUES (?%s)" % (lista, ", ?" * len(cols)),
+                            [prox] + list(dados))
+                pes[vid] = prox
+                prox += 1
+    else:
+        pes = {}
+
+    # --- vinculos fazenda<->pessoa (religados pelo CAR)
+    if "fazenda_pessoas" in tabs_velho:
+        for fid, pid, rf, rc in con.execute(
+                "SELECT fazenda_id, pessoa_id, relacao_fundiaria, relacao_comercial "
+                "FROM velho.fazenda_pessoas").fetchall():
+            f2, p2 = faz.get(fid), pes.get(pid)
+            if f2 is None or p2 is None:
+                perdidas += 1
+                continue
+            con.execute("INSERT OR IGNORE INTO fazenda_pessoas "
+                        "(fazenda_id, pessoa_id, relacao_fundiaria, relacao_comercial) "
+                        "VALUES (?,?,?,?)", [f2, p2, rf, rc])
+
+    # --- registros da equipe (religados pelo CAR)
+    if "registros" in tabs_velho:
+        for fid, autor, texto, quando in con.execute(
+                "SELECT fazenda_id, autor, texto, criado_em FROM velho.registros").fetchall():
+            f2 = faz.get(fid)
+            if f2 is None:
+                perdidas += 1
+                continue
+            con.execute("INSERT INTO registros (fazenda_id, autor, texto, criado_em) "
+                        "VALUES (?,?,?,?)", [f2, autor, texto, quando])
+
+    # --- territorios (municipios religados pelo codigo do IBGE)
+    if "territorios" in tabs_velho:
+        for tid, nome, quando in con.execute(
+                "SELECT id, nome, criado_em FROM velho.territorios").fetchall():
+            cur = con.execute("INSERT INTO territorios (nome, criado_em) VALUES (?,?)", [nome, quando])
+            novo_tid = cur.lastrowid
+            for (mid,) in con.execute(
+                    "SELECT municipio_id FROM velho.territorio_municipios WHERE territorio_id = ?",
+                    [tid]).fetchall():
+                m2 = mun.get(mid)
+                if m2 is None:
+                    perdidas += 1
+                    continue
+                con.execute("INSERT OR IGNORE INTO territorio_municipios "
+                            "(territorio_id, municipio_id) VALUES (?,?)", [novo_tid, m2])
+
     # categorias marcadas pela equipe (casadas pelo codigo do CAR, que nao muda)
     if "fazendas" in tabs_velho:
         con.execute("""UPDATE fazendas SET categoria = (
@@ -133,6 +223,8 @@ def _atlas_migra_edicoes(antigo, novo):
     con.commit()
     con.execute("DETACH velho")
     con.close()
+    if perdidas:
+        print("[atlas] AVISO: %d vínculo(s)/registro(s) não encontraram destino na base nova" % perdidas)
 
 
 def atlas_boot():
@@ -325,6 +417,25 @@ def _atlas_dentro(poligono, x, y):
     return dentro
 
 
+def _atlas_aneis_de(con, fazenda_id):
+    """Anéis do contorno de uma fazenda, seja qual for o formato da base."""
+    try:
+        r = con.execute("SELECT d FROM fazenda_contorno_d WHERE fazenda_id = ?",
+                        [fazenda_id]).fetchone()
+        if r:
+            return _atlas_decodifica(r["d"] if not isinstance(r, tuple) else r[0])
+    except sqlite3.Error:
+        pass
+    try:
+        r = con.execute("SELECT geojson FROM fazenda_contorno WHERE fazenda_id = ?",
+                        [fazenda_id]).fetchone()
+        if r:
+            return json.loads(r["geojson"] if not isinstance(r, tuple) else r[0])
+    except (sqlite3.Error, ValueError):
+        pass
+    return []
+
+
 def _atlas_acha_fazenda(con, tem_contorno, car=None, lat=None, lon=None, nome=None, municipio=None):
     """A qual fazenda a linha da planilha se refere (CAR > coordenada > nome)."""
     if car:
@@ -340,15 +451,12 @@ def _atlas_acha_fazenda(con, tem_contorno, car=None, lat=None, lon=None, nome=No
         melhor, dist = None, None
         for c in cands:
             if tem_contorno:
-                g = con.execute("SELECT geojson FROM fazenda_contorno WHERE fazenda_id = ?",
-                                [c["id"]]).fetchone()
-                if g:
-                    try:
-                        for anel in json.loads(g["geojson"]):
-                            if _atlas_dentro(anel, lon, lat):
-                                return c["id"], "coordenada dentro do contorno"
-                    except Exception:
-                        pass
+                # a base compacta guarda o contorno codificado (fazenda_contorno_d);
+                # a antiga, em geojson. Usar a tabela errada quebrava a importação.
+                aneis = _atlas_aneis_de(con, c["id"])
+                for anel in aneis:
+                    if _atlas_dentro(anel, lon, lat):
+                        return c["id"], "coordenada dentro do contorno"
             dd = (c["latitude"] - lat) ** 2 + (c["longitude"] - lon) ** 2
             if dist is None or dd < dist:
                 melhor, dist = c["id"], dd
@@ -3022,6 +3130,10 @@ class Handler(BaseHTTPRequestHandler):
 
             if path == "/atlas-api/pontos" and method == "GET":
                 w, params = self._atlas_escopo(qs)   # prefixo f. (a consulta usa alias)
+                cat_p = (qs.get("categoria") or [""])[0]
+                if cat_p:                      # o mapa tem de respeitar o filtro
+                    w += " AND f.categoria = ?"
+                    params = params + [cat_p]
                 rows = con.execute(
                     "SELECT f.id, f.nome, f.latitude, f.longitude, f.area_total_ha, f.categoria, "
                     "(SELECT p.nome FROM fazenda_pessoas fp JOIN pessoas p ON p.id = fp.pessoa_id "

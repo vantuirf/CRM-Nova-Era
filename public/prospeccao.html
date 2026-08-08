@@ -456,7 +456,10 @@ function corDa(cat){
 
 /* De LONGE mostra uma bolha por município com a contagem (assim TODAS as
    fazendas aparecem, não só as 3.000 maiores); de perto, os contornos. */
-let camadaMunicipios, camadaLimite, bboxRecorte = null;   // bbox das fazendas do recorte atual
+let camadaMunicipios, camadaLimite, bboxRecorte = null;
+// cada pedido de camada leva um número; resposta de pedido antigo é jogada
+// fora (senão o mapa pinta o recorte/zoom anterior por cima do atual)
+let turnoCamada = 0;   // bbox das fazendas do recorte atual
 const ZOOM_PONTOS = 9;        // daqui até ZOOM_CONTORNOS: pontos individuais
 
 /* Contorno (limite) da cidade/território escolhido — linha amarela sobre o
@@ -465,9 +468,14 @@ async function carregarLimite(){
   const ps = new URLSearchParams();
   if (terAtivo) ps.set("territorio_id", terAtivo);
   else if (munAtivo) ps.set("municipio_id", munAtivo);
-  if (camadaLimite){ camadaLimite.remove(); camadaLimite = null; }
-  if (![...ps].length) return;             // Goiás inteiro: sem linha
+  const meu = ++turnoCamada;
+  if (![...ps].length){                    // Goiás inteiro: sem linha
+    if (camadaLimite){ camadaLimite.remove(); camadaLimite = null; }
+    return;
+  }
   const d = await api("/atlas-api/limite?" + ps);
+  if (meu !== turnoCamada) return;         // já pediram outro recorte
+  if (camadaLimite){ camadaLimite.remove(); camadaLimite = null; }
   if (!d.limites || !d.limites.length) return;
   camadaLimite = L.layerGroup(d.limites.map(m =>
     // ciano: cor que NENHUMA categoria de fazenda usa (verde/dourado/vermelho/
@@ -484,8 +492,10 @@ async function carregarBolhas(){
   const ps = escopo();
   const cat = document.getElementById("fCat").value;
   if (cat) ps.set("categoria", cat);        // vazio não entra na URL
+  const meu = ++turnoCamada;
   const d = await api("/atlas-api/mapa-municipios?" + ps);
-  if (camadaMunicipios) camadaMunicipios.remove();
+  if (meu !== turnoCamada) return;         // o usuário já mudou de visão
+  if (camadaMunicipios){ camadaMunicipios.remove(); camadaMunicipios = null; }
   const maior = Math.max(1, ...d.map(m => m.fazendas));
   camadaMunicipios = L.layerGroup(d.filter(m => m.lat).map(m => {
     const r = 12 + 26 * Math.sqrt(m.fazendas / maior);
@@ -518,7 +528,7 @@ async function carregarAreas(){
     await carregarBolhas();
     return;
   }
-  if (camadaMunicipios && mapa.hasLayer(camadaMunicipios)) camadaMunicipios.remove();
+  if (camadaMunicipios){ camadaMunicipios.remove(); camadaMunicipios = null; }
   if (z < (recorte ? 7 : ZOOM_CONTORNOS)){ // meio do caminho: pontos
     if (camadaAreas){ camadaAreas.remove(); camadaAreas = null; }
     if (camadaPontos && !mapa.hasLayer(camadaPontos)) camadaPontos.addTo(mapa);
@@ -540,7 +550,9 @@ async function carregarAreas(){
 
   clearTimeout(buscaAreas);
   mostrarAviso("carregando contornos…");
+  const meuTurnoAreas = ++turnoCamada;
   const d = await api("/atlas-api/contornos?" + ps);
+  if (meuTurnoAreas !== turnoCamada) return;   // resposta de um recorte antigo
   if (d.sem_contornos){
     // esta instalação não tem os desenhos dos contornos: segue com os pontos
     if (camadaPontos && !mapa.hasLayer(camadaPontos)) camadaPontos.addTo(mapa);
@@ -601,7 +613,10 @@ function enquadrarSeguro(cx){
 }
 
 async function carregarMapa(){
-  const pts = await api("/atlas-api/pontos?" + escopo());
+  const psPontos = escopo();
+  const catPontos = document.getElementById("fCat").value;
+  if (catPontos) psPontos.set("categoria", catPontos);
+  const pts = await api("/atlas-api/pontos?" + psPontos);
   if (camadaPontos) camadaPontos.remove();
   camadaPontos = L.layerGroup(pts.map(p =>
     L.circleMarker([p.latitude, p.longitude], {
@@ -827,7 +842,7 @@ async function novoRegistro(id){
 }
 
 document.getElementById("busca").oninput = () => { pagina = 1; carregarFazendas(); };
-document.getElementById("fCat").onchange = () => { pagina = 1; carregarFazendas(); };
+document.getElementById("fCat").onchange = () => { pagina = 1; atualizarTudo(); };
 document.getElementById("fArea").onchange = () => { pagina = 1; atualizarTudo(); };
 document.getElementById("fCult").onchange = () => { pagina = 1; atualizarTudo(); };
 document.getElementById("fCultMin").onchange = () => { pagina = 1; atualizarTudo(); };
