@@ -152,7 +152,14 @@ def atlas_boot():
             if os.path.exists(ATLAS_DB):
                 # já existe base antiga: preserva o trabalho da equipe
                 _atlas_migra_edicoes(ATLAS_DB, tmp)
-                shutil.copy2(ATLAS_DB, ATLAS_DB + ".anterior")
+                # cópia de segurança só se sobrar disco de verdade (o banco tem
+                # ~90 MB; num servidor apertado a cópia é o que derrubaria tudo)
+                try:
+                    livre = shutil.disk_usage(DATA_DIR).free
+                    if livre > os.path.getsize(ATLAS_DB) * 3:
+                        shutil.copy2(ATLAS_DB, ATLAS_DB + ".anterior")
+                except OSError:
+                    pass
                 print("[atlas] base atualizada (edições da equipe preservadas)")
             else:
                 print("[atlas] banco instalado em %s" % ATLAS_DB)
