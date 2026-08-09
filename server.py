@@ -2055,10 +2055,13 @@ MAX_REGRAS_ATIVAS = 12
 FROTA_PADRAO = {
     # cada tipo de trabalho usa uma maquina: grao no T70P, pasto no T25P,
     # fruticultura em drone proprio. Valores e capacidades sao EDITAVEIS.
+    # vida_ha = quantos hectares UM drone aguenta aplicar na vida antes de ser
+    # trocado. T70P teorico: 4.500 ciclos x 6 ha = 27.000 ha; na pratica e
+    # menos — o numero real e do usuario. Drones/ano = ha aplicados / vida_ha.
     "drones": [
-        {"id": "d1", "nome": "T70P (grãos)", "valor": 180000.0, "ha_ano": 4000.0},
-        {"id": "d2", "nome": "T25P (pastagem)", "valor": 90000.0, "ha_ano": 2500.0},
-        {"id": "d3", "nome": "Fruticultura", "valor": 120000.0, "ha_ano": 1000.0},
+        {"id": "d1", "nome": "T70P (grãos)", "valor": 180000.0, "vida_ha": 27000.0},
+        {"id": "d2", "nome": "T25P (pastagem)", "valor": 90000.0, "vida_ha": 10000.0},
+        {"id": "d3", "nome": "Fruticultura", "valor": 120000.0, "vida_ha": 6000.0},
     ],
     "manutencao_modo": "percentual",   # percentual | por_ha | fixo
     "manutencao_valor": 12.0,
@@ -2128,18 +2131,20 @@ def frota_config():
                     continue
                 nome = str(d.get("nome") or "").strip()[:30]
                 valor = _num_pos(d.get("valor"), 1e12)
-                ha = _num_pos(d.get("ha_ano"), 1e7)
+                # "ha_ano" e o nome antigo do mesmo campo: migra sem perder
+                ha = _num_pos(d.get("vida_ha") if d.get("vida_ha") is not None
+                              else d.get("ha_ano"), 1e7)
                 if not nome or ha <= 0:
                     continue
                 ds.append({"id": str(d.get("id") or ("d%d" % (i + 1)))[:12],
-                           "nome": nome, "valor": valor, "ha_ano": ha})
+                           "nome": nome, "valor": valor, "vida_ha": ha})
             if ds:
                 c["drones"] = ds
         elif "drone_valor" in salvo or "drone_ha_ano" in salvo:
             # v2: um drone so — vira o primeiro modelo, mantendo os numeros
             c["drones"] = [{"id": "d1", "nome": "Drone",
                             "valor": _num_pos(salvo.get("drone_valor"), 1e12) or 180000.0,
-                            "ha_ano": _num_pos(salvo.get("drone_ha_ano"), 1e7) or 4000.0}]
+                            "vida_ha": _num_pos(salvo.get("drone_ha_ano"), 1e7) or 27000.0}]
 
         ids_validos = {d["id"] for d in c["drones"]}
         padrao_id = c["drones"][0]["id"] if c["drones"] else "d1"
@@ -3898,7 +3903,9 @@ class Handler(BaseHTTPRequestHandler):
                     ha_d = ha_por_drone.get(d["id"], 0.0)
                     if ha_d <= 0:
                         continue
-                    n = math.ceil(ha_d / d["ha_ano"])
+                    # drones CONSUMIDOS por ano: o que se aplica no ano dividido
+                    # pelo que um drone aguenta na vida — e o numero de venda
+                    n = math.ceil(ha_d / d["vida_ha"])
                     v = n * d["valor"]
                     if modo == "percentual":
                         m = v * (cfg["manutencao_valor"] / 100.0)
@@ -3911,7 +3918,7 @@ class Handler(BaseHTTPRequestHandler):
                     manut += m
                     frota.append({"id": d["id"], "nome": d["nome"],
                                   "ha_aplicados_ano": round(ha_d),
-                                  "capacidade_ha_ano": d["ha_ano"],
+                                  "vida_ha": d["vida_ha"],
                                   "drones": n, "valor": round(v, 2),
                                   "manutencao_ano": round(m, 2)})
                 return self.send_json(200, {
@@ -4991,18 +4998,19 @@ class Handler(BaseHTTPRequestHandler):
                     nome = str(d.get("nome") or "").strip()[:30]
                     try:
                         valor = float(d.get("valor") or 0)
-                        ha = float(d.get("ha_ano") or 0)
+                        ha = float(d.get("vida_ha") if d.get("vida_ha") is not None
+                                   else d.get("ha_ano") or 0)
                     except (TypeError, ValueError):
-                        return self.send_json(400, {"error": "Preço e capacidade precisam ser números"})
+                        return self.send_json(400, {"error": "Preço e vida útil precisam ser números"})
                     if not (math.isfinite(valor) and math.isfinite(ha)):
-                        return self.send_json(400, {"error": "Preço e capacidade precisam ser números"})
+                        return self.send_json(400, {"error": "Preço e vida útil precisam ser números"})
                     if not nome:
                         return self.send_json(400, {"error": "Dê um nome a cada modelo de drone"})
                     if ha <= 0 or ha > 1e7 or valor < 0 or valor > 1e12:
                         return self.send_json(400, {"error":
-                            "Capacidade (ha/ano) e preço fora do razoável em " + nome})
+                            "Vida útil (ha por drone) e preço fora do razoável em " + nome})
                     ds.append({"id": str(d.get("id") or ("d%d" % (i + 1)))[:12],
-                               "nome": nome, "valor": valor, "ha_ano": ha})
+                               "nome": nome, "valor": valor, "vida_ha": ha})
                 if len({d["id"] for d in ds}) != len(ds):
                     return self.send_json(400, {"error": "Dois modelos com o mesmo id"})
                 cfg["drones"] = ds
@@ -5017,7 +5025,7 @@ class Handler(BaseHTTPRequestHandler):
                 if not (math.isfinite(dv) and math.isfinite(dh)) or dh <= 0 \
                    or dh > 1e7 or dv < 0 or dv > 1e12:
                     return self.send_json(400, {"error": "Preço e capacidade fora do razoável"})
-                cfg["drones"] = [{"id": "d1", "nome": "Drone", "valor": dv, "ha_ano": dh}]
+                cfg["drones"] = [{"id": "d1", "nome": "Drone", "valor": dv, "vida_ha": dh}]
             modo = str(body.get("manutencao_modo") or "percentual")
             if modo not in ("percentual", "por_ha", "fixo"):
                 return self.send_json(400, {"error": "Forma de calcular a manutenção inválida"})
