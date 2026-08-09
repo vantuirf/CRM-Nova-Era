@@ -2053,26 +2053,31 @@ MAX_REGRAS_ATIVAS = 12
 #  - SEQUEIRO: cultura a cultura. A safrinha nao e uma area nova: e uma FRACAO
 #    da area de soja replantada (milho em ~70%, depois sorgo em parte)."""
 FROTA_PADRAO = {
-    "drone_valor": 180000.0,      # R$ por drone
-    "drone_ha_ano": 4000.0,       # hectares que um drone aplica por ano
+    # cada tipo de trabalho usa uma maquina: grao no T70P, pasto no T25P,
+    # fruticultura em drone proprio. Valores e capacidades sao EDITAVEIS.
+    "drones": [
+        {"id": "d1", "nome": "T70P (grãos)", "valor": 180000.0, "ha_ano": 4000.0},
+        {"id": "d2", "nome": "T25P (pastagem)", "valor": 90000.0, "ha_ano": 2500.0},
+        {"id": "d3", "nome": "Fruticultura", "valor": 120000.0, "ha_ano": 1000.0},
+    ],
     "manutencao_modo": "percentual",   # percentual | por_ha | fixo
     "manutencao_valor": 12.0,
     # sucessao de safras NA AREA IRRIGADA (numeros do proprio usuario)
     "pivo_safras": [
-        {"nome": "Soja", "aplicacoes": 10.0},
-        {"nome": "Milho", "aplicacoes": 10.0},
-        {"nome": "Feijão", "aplicacoes": 15.0},
+        {"nome": "Soja", "aplicacoes": 10.0, "drone": "d1"},
+        {"nome": "Milho", "aplicacoes": 10.0, "drone": "d1"},
+        {"nome": "Feijão", "aplicacoes": 15.0, "drone": "d1"},
     ],
-    # sequeiro: cada linha diz DE ONDE vem a area (cultura do MapBiomas),
-    # que fatia dela entra, e quantas aplicacoes leva
+    # sequeiro: cada linha diz DE ONDE vem a area, a fatia, as aplicacoes
+    # e COM QUAL DRONE se aplica
     "sequeiro": [
-        {"nome": "Soja", "base_id": 1, "fatia": 100.0, "aplicacoes": 8.0},
-        {"nome": "Milho safrinha", "base_id": 1, "fatia": 70.0, "aplicacoes": 6.0},
-        {"nome": "Sorgo", "base_id": 1, "fatia": 20.0, "aplicacoes": 5.0},
-        {"nome": "Pastagem", "base_id": 8, "fatia": 30.0, "aplicacoes": 2.0},
-        {"nome": "Algodão", "base_id": 3, "fatia": 100.0, "aplicacoes": 40.0},
-        {"nome": "Café", "base_id": 6, "fatia": 100.0, "aplicacoes": 8.0},
-        {"nome": "Laranja / citrus", "base_id": 7, "fatia": 100.0, "aplicacoes": 8.0},
+        {"nome": "Soja", "base_id": 1, "fatia": 100.0, "aplicacoes": 8.0, "drone": "d1"},
+        {"nome": "Milho safrinha", "base_id": 1, "fatia": 70.0, "aplicacoes": 6.0, "drone": "d1"},
+        {"nome": "Sorgo", "base_id": 1, "fatia": 20.0, "aplicacoes": 5.0, "drone": "d1"},
+        {"nome": "Pastagem", "base_id": 8, "fatia": 30.0, "aplicacoes": 2.0, "drone": "d2"},
+        {"nome": "Algodão", "base_id": 3, "fatia": 100.0, "aplicacoes": 40.0, "drone": "d1"},
+        {"nome": "Café", "base_id": 6, "fatia": 100.0, "aplicacoes": 8.0, "drone": "d3"},
+        {"nome": "Laranja / citrus", "base_id": 7, "fatia": 100.0, "aplicacoes": 8.0, "drone": "d3"},
     ],
 }
 
@@ -2087,7 +2092,8 @@ def _frota_linhas(bruto, com_base):
         ap = _num_pos(r.get("aplicacoes"), 60)
         if not nome or ap <= 0:
             continue
-        linha = {"nome": nome, "aplicacoes": ap}
+        linha = {"nome": nome, "aplicacoes": ap,
+                 "drone": str(r.get("drone") or "d1")[:12]}
         if com_base:
             if not str(r.get("base_id") or "").lstrip("-").isdigit():
                 continue
@@ -2101,23 +2107,50 @@ def _frota_linhas(bruto, com_base):
 
 
 def frota_config():
-    """Configuracao da conta de frota. Migra sozinho o formato antigo
-    (um numero unico de aplicacoes no pivo + culturas simples)."""
-    c = {k: (list(v) if isinstance(v, list) else v) for k, v in FROTA_PADRAO.items()}
+    """Configuracao da conta de frota (v3: varios modelos de drone).
+    Migra sozinho os formatos anteriores: v2 (um drone unico) e v1
+    (pivo_aplicacoes + culturas simples)."""
+    c = {k: (json.loads(json.dumps(v)) if isinstance(v, list) else v)
+         for k, v in FROTA_PADRAO.items()}
     salvo = _db.get("settings", {}).get("frota")
     if isinstance(salvo, dict):
-        for k, teto in (("drone_valor", 1e12), ("drone_ha_ano", 1e7), ("manutencao_valor", 1e12)):
-            if k in salvo:
-                c[k] = _num_pos(salvo.get(k), teto)
         modo = str(salvo.get("manutencao_modo") or "")
         if modo in ("percentual", "por_ha", "fixo"):
             c["manutencao_modo"] = modo
-        if "pivo_safras" in salvo or "sequeiro" in salvo:      # formato novo
+        if "manutencao_valor" in salvo:
+            c["manutencao_valor"] = _num_pos(salvo.get("manutencao_valor"), 1e12)
+
+        # ---- modelos de drone ----
+        if isinstance(salvo.get("drones"), list) and salvo["drones"]:
+            ds = []
+            for i, d in enumerate(salvo["drones"][:10]):
+                if not isinstance(d, dict):
+                    continue
+                nome = str(d.get("nome") or "").strip()[:30]
+                valor = _num_pos(d.get("valor"), 1e12)
+                ha = _num_pos(d.get("ha_ano"), 1e7)
+                if not nome or ha <= 0:
+                    continue
+                ds.append({"id": str(d.get("id") or ("d%d" % (i + 1)))[:12],
+                           "nome": nome, "valor": valor, "ha_ano": ha})
+            if ds:
+                c["drones"] = ds
+        elif "drone_valor" in salvo or "drone_ha_ano" in salvo:
+            # v2: um drone so — vira o primeiro modelo, mantendo os numeros
+            c["drones"] = [{"id": "d1", "nome": "Drone",
+                            "valor": _num_pos(salvo.get("drone_valor"), 1e12) or 180000.0,
+                            "ha_ano": _num_pos(salvo.get("drone_ha_ano"), 1e7) or 4000.0}]
+
+        ids_validos = {d["id"] for d in c["drones"]}
+        padrao_id = c["drones"][0]["id"] if c["drones"] else "d1"
+
+        if "pivo_safras" in salvo or "sequeiro" in salvo:      # v2/v3
             c["pivo_safras"] = _frota_linhas(salvo.get("pivo_safras"), com_base=False)
             c["sequeiro"] = _frota_linhas(salvo.get("sequeiro"), com_base=True)
-        elif "culturas" in salvo:                              # formato antigo
+        elif "culturas" in salvo:                              # v1
             ap = _num_pos(salvo.get("pivo_aplicacoes"), 60)
-            c["pivo_safras"] = ([{"nome": "Aplicações no pivô", "aplicacoes": ap}] if ap > 0 else [])
+            c["pivo_safras"] = ([{"nome": "Aplicações no pivô", "aplicacoes": ap,
+                                  "drone": padrao_id}] if ap > 0 else [])
             seq = []
             nomes = {}
             try:
@@ -2135,10 +2168,12 @@ def frota_config():
                 seq.append({"nome": nomes.get(str(cid), "Cultura " + str(cid)),
                             "base_id": int(cid),
                             "fatia": min(_num_pos(v.get("fatia") if v.get("fatia") is not None else 100, 100) or 100, 100),
-                            "aplicacoes": a})
+                            "aplicacoes": a, "drone": padrao_id})
             c["sequeiro"] = seq
-    if c["drone_ha_ano"] <= 0:
-        c["drone_ha_ano"] = FROTA_PADRAO["drone_ha_ano"]
+        # linha apontando para drone que nao existe cai no primeiro
+        for lin in c["pivo_safras"] + c["sequeiro"]:
+            if lin.get("drone") not in ids_validos:
+                lin["drone"] = padrao_id
     return c
 
 
@@ -3783,11 +3818,16 @@ class Handler(BaseHTTPRequestHandler):
                 total_lavoura = sum(a["ha"] for a in areas.values()) or 1.0
 
                 # ---- pivo: sucessao de safras sobre a MESMA area irrigada ----
+                nomes_drone = {d["id"]: d["nome"] for d in cfg["drones"]}
+                ha_por_drone = {}
                 pivo_itens, apl_pivo = [], 0.0
                 for s in cfg["pivo_safras"]:
                     ha = irr * s["aplicacoes"]
                     apl_pivo += s["aplicacoes"]
+                    did = s.get("drone") or cfg["drones"][0]["id"]
+                    ha_por_drone[did] = ha_por_drone.get(did, 0.0) + ha
                     pivo_itens.append({"nome": s["nome"], "aplicacoes": s["aplicacoes"],
+                                       "drone": nomes_drone.get(did, did),
                                        "ha_aplicados_ano": round(ha)})
                 ha_pivo = irr * apl_pivo
 
@@ -3838,7 +3878,10 @@ class Handler(BaseHTTPRequestHandler):
                     area_cons = base_seq * (r["fatia"] / 100.0)
                     ha = area_cons * r["aplicacoes"]
                     ha_seq += ha
+                    did = r.get("drone") or cfg["drones"][0]["id"]
+                    ha_por_drone[did] = ha_por_drone.get(did, 0.0) + ha
                     seq_itens.append({"nome": r["nome"], "base": a_["nome"],
+                                      "drone": nomes_drone.get(did, did),
                                       "base_id": r["base_id"],
                                       "fonte_ibge": bool(a_.get("fonte_ibge")),
                                       "fonte_manual": bool(a_.get("fonte_manual")),
@@ -3847,21 +3890,37 @@ class Handler(BaseHTTPRequestHandler):
                                       "area_considerada_ha": round(area_cons),
                                       "ha_aplicados_ano": round(ha)})
                 ha_ano = ha_pivo + ha_seq
-                drones = math.ceil(ha_ano / cfg["drone_ha_ano"]) if ha_ano > 0 else 0
-                valor_drones = drones * cfg["drone_valor"]
+                # fecha a conta POR MODELO: pasto nao consome T70P nem o
+                # contrario — cada maquina tem a sua capacidade e o seu preco
                 modo = cfg["manutencao_modo"]
-                if modo == "percentual":
-                    manut = valor_drones * (cfg["manutencao_valor"] / 100.0)
-                elif modo == "por_ha":
-                    manut = ha_ano * cfg["manutencao_valor"]
-                else:
-                    manut = drones * cfg["manutencao_valor"]
+                frota, drones, valor_drones, manut = [], 0, 0.0, 0.0
+                for d in cfg["drones"]:
+                    ha_d = ha_por_drone.get(d["id"], 0.0)
+                    if ha_d <= 0:
+                        continue
+                    n = math.ceil(ha_d / d["ha_ano"])
+                    v = n * d["valor"]
+                    if modo == "percentual":
+                        m = v * (cfg["manutencao_valor"] / 100.0)
+                    elif modo == "por_ha":
+                        m = ha_d * cfg["manutencao_valor"]
+                    else:
+                        m = n * cfg["manutencao_valor"]
+                    drones += n
+                    valor_drones += v
+                    manut += m
+                    frota.append({"id": d["id"], "nome": d["nome"],
+                                  "ha_aplicados_ano": round(ha_d),
+                                  "capacidade_ha_ano": d["ha_ano"],
+                                  "drones": n, "valor": round(v, 2),
+                                  "manutencao_ano": round(m, 2)})
                 return self.send_json(200, {
                     "config": cfg,
                     "pivo": {"area_ha": round(irr), "aplicacoes_ano": apl_pivo,
                              "itens": pivo_itens, "ha_aplicados_ano": round(ha_pivo)},
                     "sequeiro": sorted(seq_itens, key=lambda x: -x["ha_aplicados_ano"]),
                     "ha_aplicados_ano": round(ha_ano),
+                    "frota": frota,
                     "drones": drones,
                     "valor_drones": round(valor_drones, 2),
                     "manutencao_ano": round(manut, 2),
@@ -4920,24 +4979,58 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:
                 return self.send_json(400, {"error": "Corpo invalido"})
             cfg = {}
-            for k, teto in (("drone_valor", 1e12), ("drone_ha_ano", 1e7),
-                            ("manutencao_valor", 1e12)):
-                if k in body:
+            # ---- modelos de drone ----
+            drones = body.get("drones")
+            if drones is not None:
+                if not isinstance(drones, list) or not (1 <= len(drones) <= 10):
+                    return self.send_json(400, {"error": "De 1 a 10 modelos de drone"})
+                ds = []
+                for i, d in enumerate(drones):
+                    if not isinstance(d, dict):
+                        return self.send_json(400, {"error": "Modelo de drone inválido"})
+                    nome = str(d.get("nome") or "").strip()[:30]
                     try:
-                        v = float(body.get(k) or 0)
+                        valor = float(d.get("valor") or 0)
+                        ha = float(d.get("ha_ano") or 0)
                     except (TypeError, ValueError):
-                        return self.send_json(400, {"error": "Os valores precisam ser números"})
-                    if not math.isfinite(v) or v < 0 or v > teto:
-                        return self.send_json(400, {"error": "Valor fora do razoável em " + k})
-                    cfg[k] = v
-            if cfg.get("drone_ha_ano", 1) <= 0:
-                return self.send_json(400, {"error": "Diga quantos hectares um drone aplica por ano"})
+                        return self.send_json(400, {"error": "Preço e capacidade precisam ser números"})
+                    if not (math.isfinite(valor) and math.isfinite(ha)):
+                        return self.send_json(400, {"error": "Preço e capacidade precisam ser números"})
+                    if not nome:
+                        return self.send_json(400, {"error": "Dê um nome a cada modelo de drone"})
+                    if ha <= 0 or ha > 1e7 or valor < 0 or valor > 1e12:
+                        return self.send_json(400, {"error":
+                            "Capacidade (ha/ano) e preço fora do razoável em " + nome})
+                    ds.append({"id": str(d.get("id") or ("d%d" % (i + 1)))[:12],
+                               "nome": nome, "valor": valor, "ha_ano": ha})
+                if len({d["id"] for d in ds}) != len(ds):
+                    return self.send_json(400, {"error": "Dois modelos com o mesmo id"})
+                cfg["drones"] = ds
+            elif "drone_valor" in body or "drone_ha_ano" in body:
+                # formato v2 (tela antiga em cache): um drone unico — validado
+                # e convertido, em vez de descartado em silencio
+                try:
+                    dv = float(body.get("drone_valor") or 0)
+                    dh = float(body.get("drone_ha_ano") or 0)
+                except (TypeError, ValueError):
+                    return self.send_json(400, {"error": "Os valores precisam ser números"})
+                if not (math.isfinite(dv) and math.isfinite(dh)) or dh <= 0 \
+                   or dh > 1e7 or dv < 0 or dv > 1e12:
+                    return self.send_json(400, {"error": "Preço e capacidade fora do razoável"})
+                cfg["drones"] = [{"id": "d1", "nome": "Drone", "valor": dv, "ha_ano": dh}]
             modo = str(body.get("manutencao_modo") or "percentual")
             if modo not in ("percentual", "por_ha", "fixo"):
                 return self.send_json(400, {"error": "Forma de calcular a manutenção inválida"})
             cfg["manutencao_modo"] = modo
-            # as listas: safras do pivo (nome + aplicacoes) e sequeiro
-            # (nome + de-onde-vem-a-area + % + aplicacoes)
+            if "manutencao_valor" in body:
+                try:
+                    mv = float(body.get("manutencao_valor") or 0)
+                except (TypeError, ValueError):
+                    return self.send_json(400, {"error": "Os valores precisam ser números"})
+                if not math.isfinite(mv) or mv < 0 or mv > 1e12:
+                    return self.send_json(400, {"error": "Valor de manutenção fora do razoável"})
+                cfg["manutencao_valor"] = mv
+            ids_ok = {d["id"] for d in (cfg.get("drones") or frota_config()["drones"])}
             for campo, com_base in (("pivo_safras", False), ("sequeiro", True)):
                 bruto = body.get(campo)
                 if bruto is None:
@@ -4963,6 +5056,9 @@ class Handler(BaseHTTPRequestHandler):
                             return self.send_json(400, {"error": "A área manual precisa ser um número"})
                         if not math.isfinite(am) or am < 0 or am > 1e7:
                             return self.send_json(400, {"error": "Área manual fora do razoável"})
+                    if r.get("drone") and str(r.get("drone")) not in ids_ok:
+                        return self.send_json(400, {"error":
+                            "Linha aponta para um drone que não existe: " + str(r.get("nome") or "")})
                     if com_base and not str(r.get("base_id") or "").isdigit():
                         return self.send_json(400, {"error":
                             "Cada linha do sequeiro precisa dizer de onde vem a área"})

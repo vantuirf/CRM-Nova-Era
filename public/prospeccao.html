@@ -120,10 +120,12 @@
   .lista-cult{display:grid;gap:7px}
   .linha-cult{display:grid;grid-template-columns:1fr 58px 58px;gap:6px;align-items:center;
     font-size:12.5px}
-  .linha-cult.c2{grid-template-columns:1fr 58px 26px}
-  .linha-cult.c4{grid-template-columns:1fr 88px 52px 40px 40px 24px}
-  .cab-cult.c2{grid-template-columns:1fr 58px 26px}
-  .cab-cult.c4{grid-template-columns:1fr 88px 52px 40px 40px 24px}
+  .linha-cult.c2{grid-template-columns:1fr 52px 62px 24px}
+  .linha-cult.cd{grid-template-columns:1fr 74px 62px 24px}
+  .cab-cult.cd{grid-template-columns:1fr 74px 62px 24px}
+  .linha-cult.c4{grid-template-columns:1fr 76px 46px 34px 34px 58px 22px}
+  .cab-cult.c2{grid-template-columns:1fr 52px 62px 24px}
+  .cab-cult.c4{grid-template-columns:1fr 76px 46px 34px 34px 58px 22px}
   .linha-cult select{width:100%;padding:5px 4px;border:1px solid var(--borda);border-radius:6px;
     font-size:11.5px;background:#fff}
   .linha-cult .tira{background:none;border:0;color:#a33;cursor:pointer;font-size:15px;padding:0}
@@ -365,17 +367,17 @@
           <p class="pot-dica">A conta é por <b>hectare aplicado no ano</b> — área × número de
             aplicações. É o uso que gasta o drone e vende a próxima peça.</p>
 
-          <label class="campo-f">A cada quantos ha aplicados se consome um drone
-            <input id="fDroneHa" type="number" min="1" step="100"> <small>ha/ano</small>
-          </label>
-          <label class="campo-f">Preço do drone
-            <input id="fDroneValor" type="number" min="0" step="1000"> <small>R$</small>
-          </label>
+          <h4>🚁 Seus drones</h4>
+          <p class="pot-dica">Um modelo por tipo de trabalho: T70P para grão, T25P para
+            pasto, outro para fruticultura. "Capacidade" = quantos ha ele aplica por ano.</p>
+          <div class="cab-cult cd"><span>Modelo</span><span>R$</span><span>ha/ano</span><span></span></div>
+          <div id="fDrones" class="lista-cult"></div>
+          <button id="btAddDrone" class="bt-sec btzinho">+ modelo de drone</button>
 
           <h4>💧 Na área com pivô — safra o ano todo</h4>
           <p class="pot-dica">A mesma terra roda várias culturas no ano. Escreva a sucessão
             e as aplicações de cada uma (ex.: soja 10, milho 10, feijão 15).</p>
-          <div class="cab-cult c2"><span>Cultura no pivô</span><span>Apl.</span><span></span></div>
+          <div class="cab-cult c2"><span>Cultura no pivô</span><span>Apl.</span><span>Drone</span><span></span></div>
           <div id="fPivoSafras" class="lista-cult"></div>
           <button id="btAddPivo" class="bt-sec btzinho">+ safra no pivô</button>
 
@@ -386,7 +388,7 @@
           <h4>🌱 No sequeiro — cultura a cultura</h4>
           <p class="pot-dica">A safrinha entra como <b>parte da área de outra cultura</b>:
             milho em 70% da soja, sorgo depois. Pastagem: só a fatia que recebe aplicação.</p>
-          <div class="cab-cult c4"><span>Nome</span><span>Área vem de</span><span title="Área que VOCÊ conhece, em ha — manda em tudo">Sua ha</span><span>%</span><span>Apl.</span></div>
+          <div class="cab-cult c4"><span>Nome</span><span>Área vem de</span><span title="Área que VOCÊ conhece, em ha — manda em tudo">Sua ha</span><span>%</span><span>Apl.</span><span>Drone</span></div>
           <div id="fSequeiro" class="lista-cult"></div>
           <button id="btAddSeq" class="bt-sec btzinho">+ linha no sequeiro</button>
 
@@ -920,11 +922,14 @@ async function carregarFrota(){
   desenharConfigFrota();
   const onde = terAtivo || munAtivo
     ? document.getElementById("subtitulo").textContent : "Goiás e DF";
-  document.getElementById("frotaResumo").innerHTML = `
-    <div class="cx"><b>${fmt(d.drones)}</b><span>drones que ${esc(onde)} consome por ano</span></div>
-    <div class="cx"><b>${rs(d.valor_drones)}</b><span>em drones</span></div>
-    <div class="cx azul"><b>${rs(d.manutencao_ano)}</b><span>em peças e manutenção por ano</span></div>
-    <div class="cx"><b>${rs(d.total_ano)}</b><span>total no primeiro ano</span></div>`;
+  document.getElementById("frotaResumo").innerHTML =
+    (d.frota || []).map(f => `
+      <div class="cx"><b>${fmt(f.drones)}× ${esc(f.nome)}</b>
+        <span>${fmt(f.ha_aplicados_ano)} ha/ano ÷ ${fmt(f.capacidade_ha_ano)} · ${rs(f.valor)}
+        · manutenção ${rs(f.manutencao_ano)}/ano</span></div>`).join("") + `
+    <div class="cx azul"><b>${rs(d.total_ano)}</b>
+      <span>${fmt(d.drones)} drones em ${esc(onde)} — ${rs(d.valor_drones)} em máquinas
+      + ${rs(d.manutencao_ano)}/ano em peças e manutenção</span></div>`;
 
   const pv = d.pivo;
   let linhas = "";
@@ -932,7 +937,8 @@ async function carregarFrota(){
     linhas += `<tr class="tit"><td colspan="4">💧 Área com pivô — ${fmt(pv.area_ha)} ha, safra o ano todo</td>
       <td class="num"></td></tr>`;
     linhas += pv.itens.map(i => `<tr class="sub">
-      <td style="padding-left:26px">${esc(i.nome)} no pivô</td>
+      <td style="padding-left:26px">${esc(i.nome)} no pivô
+        <small style="color:#9aa6b2">· ${esc(i.drone)}</small></td>
       <td class="num">${fmt(pv.area_ha)} ha</td><td class="num">—</td>
       <td class="num">${fmt(i.aplicacoes)}</td>
       <td class="num">${fmt(i.ha_aplicados_ano)}</td></tr>`).join("");
@@ -944,6 +950,7 @@ async function carregarFrota(){
     linhas += `<tr class="tit"><td colspan="5">🌱 Sequeiro — cultura a cultura</td></tr>`;
     linhas += d.sequeiro.map(s => `<tr>
       <td style="padding-left:26px">${esc(s.nome)}
+        <small style="color:#9aa6b2">· ${esc(s.drone)}</small>
         ${s.fonte_manual ? `<span style="background:#eef6ee;color:#0f7b3f;border-radius:4px;padding:1px 6px;font-size:10.5px" title="Área informada por você — manda em tudo">sua área</span>`
           : s.fonte_ibge ? `<span style="background:#e8effa;color:#1e63a8;border-radius:4px;padding:1px 6px;font-size:10.5px" title="O satélite subconta perenes — esta área vem da Produção Agrícola Municipal do IBGE">IBGE</span>` : ""}
         <small style="color:#9aa6b2;display:block">${s.fatia < 100
@@ -965,16 +972,25 @@ async function carregarFrota(){
 
 function desenharConfigFrota(){
   const c = frotaCfg;
-  document.getElementById("fDroneHa").value = c.drone_ha_ano;
-  document.getElementById("fDroneValor").value = c.drone_valor;
   document.getElementById("fManutModo").value = c.manutencao_modo;
   document.getElementById("fManutValor").value = c.manutencao_valor;
   unidadeManut();
+  // modelos de drone
+  document.getElementById("fDrones").innerHTML = c.drones.map((d, i) => `
+    <div class="linha-cult cd">
+      <input data-d="${i}" data-c="nome" maxlength="30" value="${esc(d.nome)}">
+      <input data-d="${i}" data-c="valor" type="number" min="0" step="1000" value="${d.valor}">
+      <input data-d="${i}" data-c="ha_ano" type="number" min="1" step="100" value="${d.ha_ano}">
+      <button class="tira" data-tirad="${i}" title="Tirar">×</button>
+    </div>`).join("");
+  const opsDrone = sel => c.drones.map(d =>
+    `<option value="${d.id}" ${d.id === sel ? "selected" : ""}>${esc(d.nome)}</option>`).join("");
   // safras no pivo
   document.getElementById("fPivoSafras").innerHTML = c.pivo_safras.map((s, i) => `
     <div class="linha-cult c2">
       <input data-p="${i}" data-c="nome" maxlength="40" value="${esc(s.nome)}">
       <input data-p="${i}" data-c="aplicacoes" type="number" min="0" max="60" step="1" value="${s.aplicacoes}">
+      <select data-p="${i}" data-c="drone">${opsDrone(s.drone)}</select>
       <button class="tira" data-tirap="${i}" title="Tirar">×</button>
     </div>`).join("") || `<small style="color:#9aa6b2">Nenhuma safra no pivô.</small>`;
   // sequeiro
@@ -989,16 +1005,27 @@ function desenharConfigFrota(){
              value="${s.area_manual_ha || ""}">
       <input data-s="${i}" data-c="fatia" type="number" min="0" max="100" step="5" value="${s.fatia}">
       <input data-s="${i}" data-c="aplicacoes" type="number" min="0" max="60" step="1" value="${s.aplicacoes}">
+      <select data-s="${i}" data-c="drone">${opsDrone(s.drone)}</select>
       <button class="tira" data-tiras="${i}" title="Tirar">×</button>
     </div>`).join("") || `<small style="color:#9aa6b2">Nenhuma cultura no sequeiro.</small>`;
   // ligacoes
+  document.querySelectorAll("#fDrones [data-c]").forEach(el => el.onchange = () => {
+    const d = frotaCfg.drones[+el.dataset.d];
+    d[el.dataset.c] = el.dataset.c === "nome" ? el.value : Number(el.value);
+  });
+  document.querySelectorAll("[data-tirad]").forEach(el => el.onclick = () => {
+    if (frotaCfg.drones.length <= 1){
+      document.getElementById("frotaMsg").textContent = "Precisa de pelo menos um modelo."; return;
+    }
+    frotaCfg.drones.splice(+el.dataset.tirad, 1); desenharConfigFrota();
+  });
   document.querySelectorAll("#fPivoSafras [data-c]").forEach(el => el.onchange = () => {
     const r = frotaCfg.pivo_safras[+el.dataset.p];
-    r[el.dataset.c] = el.dataset.c === "nome" ? el.value : Number(el.value);
+    r[el.dataset.c] = (el.dataset.c === "nome" || el.dataset.c === "drone") ? el.value : Number(el.value);
   });
   document.querySelectorAll("#fSequeiro [data-c]").forEach(el => el.onchange = () => {
     const r = frotaCfg.sequeiro[+el.dataset.s];
-    r[el.dataset.c] = el.dataset.c === "nome" ? el.value : Number(el.value);
+    r[el.dataset.c] = (el.dataset.c === "nome" || el.dataset.c === "drone") ? el.value : Number(el.value);
   });
   document.querySelectorAll("[data-tirap]").forEach(el => el.onclick = () => {
     frotaCfg.pivo_safras.splice(+el.dataset.tirap, 1); desenharConfigFrota();
@@ -1008,13 +1035,18 @@ function desenharConfigFrota(){
   });
 }
 
+document.getElementById("btAddDrone").onclick = () => {
+  frotaCfg.drones.push({id: "d" + (Date.now() % 100000), nome: "", valor: 100000, ha_ano: 2000});
+  desenharConfigFrota();
+};
 document.getElementById("btAddPivo").onclick = () => {
-  frotaCfg.pivo_safras.push({nome: "", aplicacoes: 10});
+  frotaCfg.pivo_safras.push({nome: "", aplicacoes: 10, drone: frotaCfg.drones[0].id});
   desenharConfigFrota();
 };
 document.getElementById("btAddSeq").onclick = () => {
   const c = frotaCults[0] || {id: 1};
-  frotaCfg.sequeiro.push({nome: "", base_id: c.id, fatia: 100, aplicacoes: 5});
+  frotaCfg.sequeiro.push({nome: "", base_id: c.id, fatia: 100, aplicacoes: 5,
+                          drone: frotaCfg.drones[0].id});
   desenharConfigFrota();
 };
 
@@ -1030,9 +1062,12 @@ document.getElementById("btSalvarFrota").onclick = async () => {
   const msg = document.getElementById("frotaMsg");
   const pivo_safras = frotaCfg.pivo_safras.filter(s => s.nome.trim() && s.aplicacoes > 0);
   const sequeiro = frotaCfg.sequeiro.filter(s => s.nome.trim() && s.aplicacoes > 0);
+  const drones = frotaCfg.drones.filter(d => d.nome.trim() && d.ha_ano > 0);
+  if (!drones.length){
+    msg.style.color = "#a33"; msg.textContent = "Cadastre pelo menos um modelo de drone."; return;
+  }
   const corpo = {
-    drone_ha_ano: Number(document.getElementById("fDroneHa").value),
-    drone_valor: Number(document.getElementById("fDroneValor").value),
+    drones,
     manutencao_modo: document.getElementById("fManutModo").value,
     manutencao_valor: Number(document.getElementById("fManutValor").value),
     pivo_safras, sequeiro
