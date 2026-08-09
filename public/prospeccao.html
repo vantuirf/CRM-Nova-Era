@@ -629,8 +629,11 @@ async function carregarPivos(){
   if (terAtivo) ps.set("territorio_id", terAtivo);
   else if (munAtivo) ps.set("municipio_id", munAtivo);
   const total = await api("/atlas-api/pivos?" + ps);
-  document.getElementById("kPiv").textContent = total.sem_pivos
-    ? "–" : fmt(total.total) + " · " + fmt(total.area_ha) + " ha";
+  const kp = document.getElementById("kPiv");
+  kp.textContent = total.sem_pivos ? "–" : fmt(total.total) + " · " + fmt(total.area_ha) + " ha";
+  kp.parentElement.title = total.sem_pivos ? "" :
+    `${fmt(total.atuais)} apareceram no último levantamento da ANA (${total.ultimo_levantamento}); ` +
+    `os demais foram mapeados antes e podem estar desativados`;
   if (!pivosLigado || total.sem_pivos){ camadaPivos.clearLayers(); return; }
 
   // com a camada ligada, desenha só o que está à vista (são 16 mil no estado)
@@ -645,11 +648,19 @@ async function carregarPivos(){
   if (meu !== turnoPivos || !pivosLigado) return;   // recorte já mudou
   camadaPivos.clearLayers();
   d.pivos.forEach(p => camadaPivos.addLayer(
-    L.circle([p.lat, p.lng], {radius: p.raio_m, color: "#1e90ff", weight: 1.2,
-                              fillColor: "#1e90ff", fillOpacity: .25})
+    // cinza tracejado = nao apareceu no ultimo levantamento (pode estar desativado)
+    L.circle([p.lat, p.lng], {radius: p.raio_m, weight: 1.2,
+                              color: p.atual ? "#1e90ff" : "#8a94a0",
+                              dashArray: p.atual ? null : "5 4",
+                              fillColor: p.atual ? "#1e90ff" : "#8a94a0",
+                              fillOpacity: p.atual ? .22 : .10})
       .bindTooltip(`💧 Pivô · ${fmt(p.ha)} ha` +
                    (p.municipio ? ` · ${esc(p.municipio)}` : "") +
-                   (p.ano ? `<br><small>mapeado em ${esc(p.ano)}</small>` : ""))));
+                   (p.desde && p.desde !== p.ano
+                      ? `<br><small>existe desde ${esc(p.desde)}</small>` : "") +
+                   (p.atual
+                      ? `<br><small>visto no levantamento de ${esc(p.ano)}</small>`
+                      : `<br><small>último registro em ${esc(p.ano)} — pode estar desativado</small>`))));
   if (d.total > d.mostrando)
     mostrarAviso(`mostrando ${fmt(d.mostrando)} dos ${fmt(d.total)} pivôs — aproxime para ver todos`);
 }
@@ -1054,9 +1065,12 @@ async function carregarPessoas(){
       </tr>`).join("")
     : `<tr><td colspan="${colspan}" style="color:#9aa6b2">${
         d.cobertura && d.cobertura.municipios
-          ? `O Atlas ainda não tem <b>nome de proprietário</b> nesta região. ` +
-            `Hoje há ${fmt(d.cobertura.pessoas)} proprietários mapeados em ${fmt(d.cobertura.municipios)} municípios ` +
-            `— nos demais, trabalhe pelo mapa e pela lista de fazendas.`
+          ? `O Atlas ainda não tem <b>nome de proprietário</b> nesta região — você cadastrou ` +
+            `${fmt(d.cobertura.municipios)} cidades (${fmt(d.cobertura.pessoas)} proprietários). ` +
+            `Nas outras, trabalhe pelo mapa e pela lista de fazendas.` +
+            `<div class="cidades" style="margin-top:8px">` + d.cobertura.cidades.map(c =>
+              `<span class="fam-chip" style="cursor:pointer" onclick="event.stopPropagation();irParaMunicipio(${c.id})"
+                     title="Ir para ${esc(c.nome)}">${esc(c.nome)} · ${fmt(c.donos)}</span>`).join("") + `</div>`
           : "Nenhum proprietário encontrado neste recorte."}</td></tr>`;
   document.getElementById("pgPesInfo").textContent =
     `${d.pagina} — ${fmt(r.pessoas || 0)} proprietário(s)`;

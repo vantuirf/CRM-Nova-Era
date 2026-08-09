@@ -338,20 +338,25 @@ def _pivos_boot(con):
             dados = json.load(g)
         con.execute("DROP TABLE IF EXISTS pivos")
         con.execute("CREATE TABLE pivos (id INTEGER PRIMARY KEY, lat REAL, lng REAL, "
-                    "ha REAL, ano TEXT, ibge TEXT, municipio_id INT)")
+                    "ha REAL, ano TEXT, desde TEXT, ibge TEXT, municipio_id INT)")
         # de codigo do IBGE para o municipio do Atlas (a chave que os dois lados tem)
         mapa = {str(r[1]): r[0] for r in
                 con.execute("SELECT id, codigo_ibge FROM municipios").fetchall() if r[1]}
         linhas = [(round(float(p[1]), 6), round(float(p[0]), 6), float(p[2] or 0),
-                   str(p[4] or ""), str(p[3] or ""), mapa.get(str(p[3] or "")))
+                   str(p[4] or ""), str(p[5] if len(p) > 5 else p[4] or ""),
+                   str(p[3] or ""), mapa.get(str(p[3] or "")))
                   for p in dados.get("pivos", [])
                   if p and p[0] is not None and p[1] is not None]
-        con.executemany("INSERT INTO pivos (lat, lng, ha, ano, ibge, municipio_id) "
-                        "VALUES (?,?,?,?,?,?)", linhas)
+        con.executemany("INSERT INTO pivos (lat, lng, ha, ano, desde, ibge, municipio_id) "
+                        "VALUES (?,?,?,?,?,?,?)", linhas)
         con.execute("CREATE INDEX IF NOT EXISTS idx_piv_latlng ON pivos(lat, lng)")
         con.execute("CREATE INDEX IF NOT EXISTS idx_piv_mun ON pivos(municipio_id)")
         con.execute("DELETE FROM pivos_meta")
         con.execute("INSERT INTO pivos_meta (v) VALUES (?)", [versao])
+        con.execute("CREATE TABLE IF NOT EXISTS pivos_info (chave TEXT, valor TEXT)")
+        con.execute("DELETE FROM pivos_info")
+        con.execute("INSERT INTO pivos_info (chave, valor) VALUES ('ultimo_levantamento', ?)",
+                    [str(dados.get("ultimo_levantamento") or "")])
         con.commit()
         sem_mun = sum(1 for l in linhas if l[5] is None)
         print("[atlas] %d pivos centrais instalados (%d sem municipio)"
@@ -3260,11 +3265,21 @@ class Handler(BaseHTTPRequestHandler):
                 # parece defeito quando na verdade e falta de dado na regiao.
                 cobertura = None
                 if not resumo.get("pessoas"):
-                    cob = con.execute(
-                        "SELECT COUNT(DISTINCT f.municipio_id) AS municipios, "
-                        "COUNT(DISTINCT fp.pessoa_id) AS pessoas "
-                        "FROM fazenda_pessoas fp JOIN fazendas f ON f.id = fp.fazenda_id").fetchone()
-                    cobertura = dict(cob) if cob else None
+                    # so contam as cidades cadastradas DE VERDADE: um punhado de
+                    # municipios aparece com 1 ou 2 nomes por causa de fazenda de
+                    # divisa, e inflar a conta com eles engana quem le
+                    cids = con.execute(
+                        "SELECT m.id, m.nome, COUNT(DISTINCT fp.pessoa_id) AS donos "
+                        "FROM fazenda_pessoas fp JOIN fazendas f ON f.id = fp.fazenda_id "
+                        "JOIN municipios m ON m.id = f.municipio_id "
+                        "GROUP BY m.id HAVING donos >= 20 ORDER BY donos DESC").fetchall()
+                    # somar os donos por cidade contaria duas vezes quem tem
+                    # fazenda em duas delas: o total precisa ser distinto
+                    tot_p = con.execute("SELECT COUNT(DISTINCT pessoa_id) AS n "
+                                        "FROM fazenda_pessoas").fetchone()
+                    cobertura = {"municipios": len(cids),
+                                 "pessoas": (tot_p["n"] if tot_p else 0),
+                                 "cidades": [dict(c) for c in cids]}
                 return self.send_json(200, {
                     "pessoas": pessoas,
                     "pagina": pagina, "por_pagina": 25,
@@ -3375,21 +3390,29 @@ class Handler(BaseHTTPRequestHandler):
                 tot = con.execute("SELECT COUNT(*) AS n, ROUND(COALESCE(SUM(ha),0)) AS ha "
                                   "FROM pivos WHERE " + w, params).fetchone()
                 rows = con.execute(
-                    "SELECT p.id, p.lat, p.lng, p.ha, p.ano, m.nome AS municipio "
+                    "SELECT p.id, p.lat, p.lng, p.ha, p.ano, p.desde, m.nome AS municipio "
                     "FROM pivos p LEFT JOIN municipios m ON m.id = p.municipio_id "
                     "WHERE " + w + " ORDER BY p.ha DESC LIMIT 4000", params).fetchall()
+                ult = con.execute("SELECT valor FROM pivos_info WHERE chave='ultimo_levantamento'"
+                                  ).fetchone() if "pivos_info" in tabs else None
+                ultimo = (ult["valor"] if ult else "") or ""
                 pivos = []
                 for r in rows:
                     ha = float(r["ha"] or 0)
                     # circulo de area equivalente: raio = raiz(area / pi)
-                    raio = int(math.sqrt(max(ha, 0.1) * 10000 / math.pi))
                     d = dict(r)
-                    d["raio_m"] = raio
+                    d["raio_m"] = int(math.sqrt(max(ha, 0.1) * 10000 / math.pi))
+                    # nao apareceu no ultimo levantamento: pode ter sido desativado
+                    d["atual"] = (not ultimo) or (r["ano"] == ultimo)
                     pivos.append(d)
+                ativos = con.execute("SELECT COUNT(*) AS n FROM pivos WHERE " + w +
+                                     (" AND ano = ?" if ultimo else ""),
+                                     params + ([ultimo] if ultimo else [])).fetchone()
                 return self.send_json(200, {
                     "pivos": pivos, "total": tot["n"] or 0, "area_ha": tot["ha"] or 0,
-                    "mostrando": len(pivos),
-                    "fonte": "ANA — pivôs centrais mapeados até 2019"})
+                    "mostrando": len(pivos), "atuais": ativos["n"] or 0,
+                    "ultimo_levantamento": ultimo,
+                    "fonte": "ANA — Levantamento da Agricultura Irrigada por Pivôs Centrais"})
 
             if path == "/atlas-api/potencial" and method == "GET":
                 # Potencial comercial do recorte: "a cada X ha da cultura Y
