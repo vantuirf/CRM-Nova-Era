@@ -64,6 +64,9 @@ ATLAS_DB = os.path.join(DATA_DIR, "atlas.db")
 # nao depender do atlas.db.gz de 50 MB: a cada boot conferimos a versao.
 PIVOS_GZ = os.path.join(BASE_DIR, "pivos.json.gz")
 PERENES_GZ = os.path.join(BASE_DIR, "perenes.json.gz")
+PAM_GZ = os.path.join(BASE_DIR, "pam.json.gz")
+# de nome do IBGE para a cultura do Atlas (Laranja oficial = base Citrus)
+PAM_PARA_CULTURA = {"Laranja": 7, "Café": 6}
 INICIO_ISO = datetime.now(timezone.utc).isoformat(timespec="seconds")
 # marcos publicados — /api/status usa isto para conferir se o deploy chegou
 RECURSOS = ["funil", "servicos", "curso", "tarefas", "atlas", "proprietarios",
@@ -344,6 +347,7 @@ def atlas_boot():
             print("[atlas] tabela pessoas migrada para chave primaria de verdade", flush=True)
         _pivos_boot(con)
         _perenes_boot(con)
+        _pam_boot(con)
         con.commit()
         con.close()
 
@@ -483,6 +487,53 @@ def _perenes_boot(con):
               % (len(linhas), descartadas), flush=True)
     except Exception as e:
         print("[atlas] nao foi possivel instalar os perenes:", e, flush=True)
+
+
+def _pam_boot(con):
+    """Area plantada OFICIAL (IBGE/PAM) de laranja e cafe por municipio.
+    O satelite subconta perenes fora do cinturao de SP — Itaberai tem 1.309 ha
+    de laranja no IBGE e o MapBiomas via ~150. O potencial usa o maior."""
+    if not os.path.exists(PAM_GZ):
+        return
+    try:
+        h = hashlib.sha1(open(PAM_GZ, "rb").read()).hexdigest()
+        con.execute("CREATE TABLE IF NOT EXISTS pam_meta (v TEXT)")
+        atual = con.execute("SELECT v FROM pam_meta LIMIT 1").fetchone()
+        tem = con.execute("SELECT 1 FROM sqlite_master WHERE type='table' "
+                          "AND name='culturas_ibge'").fetchone()
+        if atual and atual[0] == h and tem:
+            return
+        with gzip.open(PAM_GZ, "rt", encoding="utf-8") as g:
+            dados = json.load(g)
+        mapa = {str(r[1]): r[0] for r in
+                con.execute("SELECT id, codigo_ibge FROM municipios") if r[1]}
+        linhas = []
+        for it in dados.get("itens", []):
+            try:
+                mid = mapa.get(str(it[0]))
+                ha = float(it[2])
+                if mid is None or not math.isfinite(ha) or ha <= 0:
+                    continue
+                linhas.append((mid, str(it[1])[:40], ha, str(dados.get("ano") or "")))
+            except (TypeError, ValueError, IndexError):
+                continue
+        if not linhas:
+            return
+        con.execute("BEGIN IMMEDIATE")
+        try:
+            con.execute("DROP TABLE IF EXISTS culturas_ibge")
+            con.execute("CREATE TABLE culturas_ibge (municipio_id INT, cultura TEXT, "
+                        "area_ha REAL, ano TEXT)")
+            con.executemany("INSERT INTO culturas_ibge VALUES (?,?,?,?)", linhas)
+            con.execute("DELETE FROM pam_meta")
+            con.execute("INSERT INTO pam_meta (v) VALUES (?)", [h])
+            con.commit()
+        except Exception:
+            con.rollback()
+            raise
+        print("[atlas] %d areas oficiais do IBGE (PAM) instaladas" % len(linhas), flush=True)
+    except Exception as e:
+        print("[atlas] nao foi possivel instalar o PAM:", e, flush=True)
 
 
 def _sem_acento(txt):
@@ -2042,6 +2093,9 @@ def _frota_linhas(bruto, com_base):
                 continue
             linha["base_id"] = int(r["base_id"])
             linha["fatia"] = min(_num_pos(r.get("fatia") if r.get("fatia") is not None else 100, 100) or 0, 100)
+            # area informada pelo usuario: ele conhece a regiao melhor que a
+            # estatistica (pomar novo nao entra no PAM ate comecar a colher)
+            linha["area_manual_ha"] = _num_pos(r.get("area_manual_ha"), 1e7)
         limpo.append(linha)
     return limpo
 
@@ -3737,19 +3791,57 @@ class Handler(BaseHTTPRequestHandler):
                                        "ha_aplicados_ano": round(ha)})
                 ha_pivo = irr * apl_pivo
 
+                # area oficial do IBGE por base (laranja/cafe): o satelite
+                # subconta perenes — o potencial usa o MAIOR dos dois numeros
+                ibge_base = {}
+                if con.execute("SELECT 1 FROM sqlite_master WHERE type='table' "
+                               "AND name='culturas_ibge'").fetchone():
+                    cond_i, pi = ["1=1"], []
+                    ter_i = (qs.get("territorio_id") or [""])[0]
+                    mun_i = (qs.get("municipio_id") or [""])[0]
+                    if ter_i.isdigit():
+                        cond_i.append("municipio_id IN (SELECT municipio_id FROM "
+                                      "territorio_municipios WHERE territorio_id = ?)")
+                        pi.append(int(ter_i))
+                    elif mun_i.isdigit():
+                        cond_i.append("municipio_id = ?")
+                        pi.append(int(mun_i))
+                    for r in con.execute("SELECT cultura, SUM(area_ha) AS ha FROM culturas_ibge "
+                                         "WHERE " + " AND ".join(cond_i) + " GROUP BY cultura", pi):
+                        cid = PAM_PARA_CULTURA.get(r["cultura"])
+                        if cid:
+                            ibge_base[str(cid)] = float(r["ha"] or 0)
+
                 # ---- sequeiro: cada linha parte da area BASE (ja sem o pivo) ----
                 seq_itens, ha_seq = [], 0.0
                 for r in cfg["sequeiro"]:
                     a_ = areas.get(str(r["base_id"]))
+                    of = ibge_base.get(str(r["base_id"]), 0.0)
+                    if of > 0 and (not a_ or of > a_["ha"]):
+                        nomes_c = {6: "Café", 7: "Laranja / citrus"}
+                        a_ = {"nome": nomes_c.get(r["base_id"], "Cultura"), "ha": of,
+                              "fonte_ibge": True}
+                    # a palavra final e do usuario: area manual manda em tudo
+                    manual = float(r.get("area_manual_ha") or 0)
+                    if manual > 0:
+                        nome_b = (a_ or {}).get("nome") or {6: "Café", 7: "Laranja / citrus"}.get(
+                            r["base_id"], "informada por você")
+                        a_ = {"nome": nome_b, "ha": manual, "fonte_manual": True}
                     if not a_ or r["aplicacoes"] <= 0:
                         continue
                     # a fatia irrigada da base ja foi contada nas safras do pivo
-                    base_seq = max(a_["ha"] - irr * (a_["ha"] / total_lavoura), 0.0)
+                    # (area manual nao sofre desconto: o numero e do usuario)
+                    if a_.get("fonte_manual"):
+                        base_seq = a_["ha"]
+                    else:
+                        base_seq = max(a_["ha"] - irr * (a_["ha"] / total_lavoura), 0.0)
                     area_cons = base_seq * (r["fatia"] / 100.0)
                     ha = area_cons * r["aplicacoes"]
                     ha_seq += ha
                     seq_itens.append({"nome": r["nome"], "base": a_["nome"],
                                       "base_id": r["base_id"],
+                                      "fonte_ibge": bool(a_.get("fonte_ibge")),
+                                      "fonte_manual": bool(a_.get("fonte_manual")),
                                       "base_ha": round(base_seq),
                                       "fatia": r["fatia"], "aplicacoes": r["aplicacoes"],
                                       "area_considerada_ha": round(area_cons),
@@ -3936,8 +4028,26 @@ class Handler(BaseHTTPRequestHandler):
                     "WHERE fc.safra = (SELECT MAX(safra) FROM fazenda_culturas) AND " + w +
                     " GROUP BY c.id ORDER BY SUM(fc.area_ha) DESC", p).fetchall()
                 total = con.execute("SELECT COUNT(*) c FROM fazendas f WHERE " + w, p).fetchone()["c"]
+                oficiais = []
+                if con.execute("SELECT 1 FROM sqlite_master WHERE type='table' "
+                               "AND name='culturas_ibge'").fetchone():
+                    cond_i, pi = ["1=1"], []
+                    ter_i = (qs.get("territorio_id") or [""])[0]
+                    mun_i = (qs.get("municipio_id") or [""])[0]
+                    if ter_i.isdigit():
+                        cond_i.append("municipio_id IN (SELECT municipio_id FROM "
+                                      "territorio_municipios WHERE territorio_id = ?)")
+                        pi.append(int(ter_i))
+                    elif mun_i.isdigit():
+                        cond_i.append("municipio_id = ?")
+                        pi.append(int(mun_i))
+                    oficiais = [dict(r) for r in con.execute(
+                        "SELECT cultura, ROUND(SUM(area_ha)) AS area_ha, MAX(ano) AS ano "
+                        "FROM culturas_ibge WHERE " + " AND ".join(cond_i) +
+                        " GROUP BY cultura ORDER BY area_ha DESC", pi)]
                 return self.send_json(200, {"total_fazendas": total,
-                                            "culturas": [dict(r) for r in rows]})
+                                            "culturas": [dict(r) for r in rows],
+                                            "ibge": oficiais})
 
             if path == "/atlas-api/resumo" and method == "GET":
                 w, p = self._atlas_escopo(qs, "")
@@ -4846,6 +4956,13 @@ class Handler(BaseHTTPRequestHandler):
                        or fa < 0 or fa > 100:
                         return self.send_json(400, {"error":
                             "Aplicações de 0 a 60 por ano; área de 0 a 100%"})
+                    if "area_manual_ha" in r and r.get("area_manual_ha") not in (None, ""):
+                        try:
+                            am = float(r.get("area_manual_ha"))
+                        except (TypeError, ValueError):
+                            return self.send_json(400, {"error": "A área manual precisa ser um número"})
+                        if not math.isfinite(am) or am < 0 or am > 1e7:
+                            return self.send_json(400, {"error": "Área manual fora do razoável"})
                     if com_base and not str(r.get("base_id") or "").isdigit():
                         return self.send_json(400, {"error":
                             "Cada linha do sequeiro precisa dizer de onde vem a área"})
