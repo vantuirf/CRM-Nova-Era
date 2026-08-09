@@ -63,6 +63,7 @@ ATLAS_DB = os.path.join(DATA_DIR, "atlas.db")
 # Pivos centrais de irrigacao (ANA, dados abertos). Vem em arquivo proprio para
 # nao depender do atlas.db.gz de 50 MB: a cada boot conferimos a versao.
 PIVOS_GZ = os.path.join(BASE_DIR, "pivos.json.gz")
+PERENES_GZ = os.path.join(BASE_DIR, "perenes.json.gz")
 INICIO_ISO = datetime.now(timezone.utc).isoformat(timespec="seconds")
 # marcos publicados — /api/status usa isto para conferir se o deploy chegou
 RECURSOS = ["funil", "servicos", "curso", "tarefas", "atlas", "proprietarios",
@@ -342,6 +343,7 @@ def atlas_boot():
             """)
             print("[atlas] tabela pessoas migrada para chave primaria de verdade", flush=True)
         _pivos_boot(con)
+        _perenes_boot(con)
         con.commit()
         con.close()
 
@@ -419,6 +421,68 @@ def _pivos_boot(con):
     except Exception as e:
         # sem pivos o CRM continua funcionando; melhor que derrubar o servidor
         print("[atlas] nao foi possivel instalar os pivos:", e, flush=True)
+
+
+def _perenes_boot(con):
+    """Instala/atualiza os talhoes de culturas perenes (cafe, laranja) vindos
+    do MapBiomas. Mesma disciplina dos pivos: le e valida TUDO antes de tocar
+    na tabela boa, troca dentro de transacao, e nunca derruba o servidor."""
+    if not os.path.exists(PERENES_GZ):
+        return
+    try:
+        h = hashlib.sha1()
+        with open(PERENES_GZ, "rb") as f:
+            for bloco in iter(lambda: f.read(1024 * 512), b""):
+                h.update(bloco)
+        versao = h.hexdigest()
+        con.execute("CREATE TABLE IF NOT EXISTS perenes_meta (v TEXT)")
+        atual = con.execute("SELECT v FROM perenes_meta LIMIT 1").fetchone()
+        tem = con.execute("SELECT 1 FROM sqlite_master WHERE type='table' "
+                          "AND name='perenes'").fetchone()
+        instalados = (con.execute("SELECT COUNT(*) FROM perenes").fetchone()[0] if tem else 0)
+        if atual and atual[0] == versao and instalados:
+            return
+        with gzip.open(PERENES_GZ, "rt", encoding="utf-8") as g:
+            dados = json.load(g)
+        nomes = {str(k): str(v)[:40] for k, v in (dados.get("classes") or {}).items()}
+        linhas, descartadas = [], 0
+        for p in dados.get("itens", []):
+            try:
+                if not p or len(p) < 7:
+                    raise ValueError("linha incompleta")
+                cl, ha = str(p[0]), float(p[1] or 0)
+                lng, lat = float(p[2]), float(p[3])
+                if not (math.isfinite(lat) and math.isfinite(lng) and math.isfinite(ha)):
+                    raise ValueError("numero invalido")
+                if not (-90 <= lat <= 90 and -180 <= lng <= 180) or ha <= 0:
+                    raise ValueError("fora do mundo")
+                linhas.append((int(cl), nomes.get(cl, "Perene"), ha, lat, lng,
+                               int(p[4]) if p[4] else None,
+                               int(p[5]) if p[5] else None, str(p[6] or "")))
+            except (TypeError, ValueError, IndexError):
+                descartadas += 1
+        if not linhas or (instalados and len(linhas) < instalados * 0.5):
+            print("[atlas] perenes NAO trocados: arquivo traria %d de %d"
+                  % (len(linhas), instalados), flush=True)
+            return
+        con.execute("BEGIN IMMEDIATE")
+        try:
+            con.execute("DROP TABLE IF EXISTS perenes")
+            con.execute("CREATE TABLE perenes (id INTEGER PRIMARY KEY, classe INT, nome TEXT, "
+                        "ha REAL, lat REAL, lng REAL, municipio_id INT, fazenda_id INT, d TEXT)")
+            con.executemany("INSERT INTO perenes (classe, nome, ha, lat, lng, municipio_id, "
+                            "fazenda_id, d) VALUES (?,?,?,?,?,?,?,?)", linhas)
+            con.execute("CREATE INDEX IF NOT EXISTS idx_per_mun ON perenes(municipio_id)")
+            con.execute("DELETE FROM perenes_meta")
+            con.execute("INSERT INTO perenes_meta (v) VALUES (?)", [versao])
+            con.commit()
+        except Exception:
+            con.rollback()
+            raise
+        print("[atlas] %d talhoes perenes instalados (%d descartados)"
+              % (len(linhas), descartadas), flush=True)
+    except Exception as e:
+        print("[atlas] nao foi possivel instalar os perenes:", e, flush=True)
 
 
 def _sem_acento(txt):
@@ -1956,6 +2020,8 @@ FROTA_PADRAO = {
         {"nome": "Sorgo", "base_id": 1, "fatia": 20.0, "aplicacoes": 5.0},
         {"nome": "Pastagem", "base_id": 8, "fatia": 30.0, "aplicacoes": 2.0},
         {"nome": "Algodão", "base_id": 3, "fatia": 100.0, "aplicacoes": 40.0},
+        {"nome": "Café", "base_id": 6, "fatia": 100.0, "aplicacoes": 8.0},
+        {"nome": "Laranja / citrus", "base_id": 7, "fatia": 100.0, "aplicacoes": 8.0},
     ],
 }
 
@@ -3716,6 +3782,45 @@ class Handler(BaseHTTPRequestHandler):
                          "area_ha": round(areas.get(str(r["id"]), {"ha": 0})["ha"])}
                         for r in con.execute(
                             "SELECT id, nome FROM culturas ORDER BY nome").fetchall()]})
+
+            if path == "/atlas-api/perenes" and method == "GET":
+                # Talhoes de culturas perenes (cafe, laranja...) no recorte —
+                # sao poucos (centenas), entao vao todos de uma vez, com o dono
+                if ("perenes" not in tabs or
+                        not con.execute("SELECT 1 FROM perenes LIMIT 1").fetchone()):
+                    return self.send_json(200, {"talhoes": [], "sem_perenes": True})
+                cond, params = ["1=1"], []
+                ter = (qs.get("territorio_id") or [""])[0]
+                mun = (qs.get("municipio_id") or [""])[0]
+                if ter.isdigit():
+                    cond.append("p.municipio_id IN (SELECT municipio_id FROM "
+                                "territorio_municipios WHERE territorio_id = ?)")
+                    params.append(int(ter))
+                elif mun.isdigit():
+                    cond.append("p.municipio_id = ?")
+                    params.append(int(mun))
+                rows = con.execute(
+                    "SELECT p.id, p.classe, p.nome, p.ha, p.lat, p.lng, p.d, p.fazenda_id, "
+                    "m.nome AS municipio, f.nome AS fazenda, "
+                    "(SELECT pe.nome FROM fazenda_pessoas fp JOIN pessoas pe ON pe.id = fp.pessoa_id "
+                    " WHERE fp.fazenda_id = p.fazenda_id LIMIT 1) AS dono "
+                    "FROM perenes p LEFT JOIN municipios m ON m.id = p.municipio_id "
+                    "LEFT JOIN fazendas f ON f.id = p.fazenda_id "
+                    "WHERE " + " AND ".join(cond) + " ORDER BY p.ha DESC LIMIT 2000",
+                    params).fetchall()
+                talhoes = []
+                for r in rows:
+                    d = dict(r)
+                    d["aneis"] = _atlas_decodifica(d.pop("d"))
+                    talhoes.append(d)
+                res = con.execute(
+                    "SELECT p.nome, COUNT(*) AS n, ROUND(SUM(p.ha)) AS ha FROM perenes p "
+                    "WHERE " + " AND ".join(cond) + " GROUP BY p.classe ORDER BY ha DESC",
+                    params).fetchall()
+                return self.send_json(200, {
+                    "talhoes": talhoes,
+                    "resumo": [dict(x) for x in res],
+                    "fonte": "MapBiomas 2023"})
 
             if path == "/atlas-api/calor" and method == "GET":
                 # Mapa de calor por cidade: quanto de area irrigada por pivo cada

@@ -260,6 +260,8 @@
           </select>
           <select id="fCultMin" title="Área mínima plantada dessa cultura">
             <option value="">Qualquer área plantada</option>
+            <option value="10">Cultura com 10+ ha</option>
+            <option value="25">Cultura com 25+ ha</option>
             <option value="50">Cultura com 50+ ha</option>
             <option value="100">Cultura com 100+ ha</option>
             <option value="300">Cultura com 300+ ha</option>
@@ -302,6 +304,8 @@
           </select>
           <select id="fCultPes" title="Mínimo da cultura somando TODAS as fazendas do produtor">
             <option value="">Qualquer área da cultura</option>
+            <option value="10">Produtor com 10+ ha</option>
+            <option value="25">Produtor com 25+ ha</option>
             <option value="50">Produtor com 50+ ha</option>
             <option value="100">Produtor com 100+ ha</option>
             <option value="200">Produtor com 200+ ha</option>
@@ -375,6 +379,10 @@
           <div id="fPivoSafras" class="lista-cult"></div>
           <button id="btAddPivo" class="bt-sec btzinho">+ safra no pivô</button>
 
+          <p class="pot-dica" style="background:#eef6ee;border:1px solid #cfe4cf;border-radius:8px;padding:8px 10px">
+            As áreas <b>não se sobrepõem</b>: cada hectare do mapa tem UMA cultura —
+            onde é pasto não é soja, onde é laranja não é soja. Cada linha abaixo
+            conta só a área daquela cultura.</p>
           <h4>🌱 No sequeiro — cultura a cultura</h4>
           <p class="pot-dica">A safrinha entra como <b>parte da área de outra cultura</b>:
             milho em 70% da soja, sorgo depois. Pastagem: só a fatia que recebe aplicação.</p>
@@ -440,6 +448,8 @@
 <script>
 const fmt = n => n == null ? "–" : Number(n).toLocaleString("pt-BR");
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"})[c]);
+/* o MapBiomas chama de "Citrus"; na tela o time procura por laranja */
+const aliasCult = n => n === "Citrus" ? "Laranja / citrus" : n;
 let munAtivo = "", terAtivo = "", pagina = 1, mapa, camadaPontos, municipiosCache = [], turnoMapa = 0;
 
 async function api(url, opts){ const r = await fetch(url, opts); return r.json(); }
@@ -466,7 +476,7 @@ async function carregarCulturas(){
   document.getElementById("tbCult").innerHTML = d.culturas.length
     ? d.culturas.map(c => `
         <tr class="linha" onclick="filtrarCultura(${c.id})" title="Clique para filtrar por ${c.nome}">
-          <td>🌿 ${esc(c.nome)}</td>
+          <td>🌿 ${esc(aliasCult(c.nome))}</td>
           <td style="text-align:right;color:#7a8794">${Math.round(c.fazendas/t*100)}% (${fmt(c.fazendas)})</td>
           <td style="text-align:right"><b>${fmt(c.area_ha)}</b> ha</td>
         </tr>`).join("")
@@ -483,7 +493,7 @@ async function carregarListaCulturas(){
   potCulturas = d.culturas.map(c => ({id: c.id, nome: c.nome}));
   document.getElementById("fCult").innerHTML =
     `<option value="">Todas as culturas</option>` +
-    d.culturas.map(c => `<option value="${c.id}">${esc(c.nome)}</option>`).join("");
+    d.culturas.map(c => `<option value="${c.id}">${esc(aliasCult(c.nome))}</option>`).join("");
 }
 
 async function carregarTerritorios(){
@@ -516,6 +526,7 @@ async function excluirTer(id){
    flutuante mostra o que já entrou e salva. */
 let montando = false, montId = null, montSel = new Set(), camadaMont = null;
 let fundoMont = null, fundoMontCache = null;
+let camadaPerenes, perenesLigado = false;
 const contornoMunCache = {};
 
 /* na montagem, TODA cidade vira área clicável no mapa — sem isso só dava para
@@ -959,7 +970,7 @@ function desenharConfigFrota(){
     </div>`).join("") || `<small style="color:#9aa6b2">Nenhuma safra no pivô.</small>`;
   // sequeiro
   const ops = sel => frotaCults.map(x =>
-    `<option value="${x.id}" ${String(x.id) === String(sel) ? "selected" : ""}>${esc(x.nome)}</option>`).join("");
+    `<option value="${x.id}" ${String(x.id) === String(sel) ? "selected" : ""}>${esc(aliasCult(x.nome))}</option>`).join("");
   document.getElementById("fSequeiro").innerHTML = c.sequeiro.map((s, i) => `
     <div class="linha-cult c4">
       <input data-s="${i}" data-c="nome" maxlength="40" value="${esc(s.nome)}">
@@ -1130,6 +1141,30 @@ async function carregarPivos(){
     mostrarAviso(`mostrando ${fmt(d.mostrando)} dos ${fmt(d.total)} pivôs — aproxime para ver todos`);
 }
 
+/* 🌳 talhões de café/laranja: poucos e valiosos — vão todos de uma vez */
+const CORES_PERENES = {46: "#8d5524", 47: "#f39c12", 48: "#8e44ad"};
+async function carregarPerenes(){
+  const ps = new URLSearchParams();
+  if (terAtivo) ps.set("territorio_id", terAtivo);
+  else if (munAtivo) ps.set("municipio_id", munAtivo);
+  const d = await api("/atlas-api/perenes?" + ps);
+  camadaPerenes.clearLayers();
+  if (!perenesLigado || d.sem_perenes) return;
+  d.talhoes.forEach(t => {
+    if (!t.aneis || !t.aneis.length) return;
+    camadaPerenes.addLayer(L.polygon(t.aneis.map(a => a.map(([x, y]) => [y, x])), {
+      color: CORES_PERENES[t.classe] || "#8e44ad", weight: 2,
+      fillColor: CORES_PERENES[t.classe] || "#8e44ad", fillOpacity: .45
+    }).bindTooltip(`🌳 ${esc(t.nome)} · ${fmt(t.ha)} ha` +
+        (t.fazenda ? `<br>${esc(t.fazenda)}` : "") +
+        (t.dono ? `<br>👤 ${esc(t.dono)}` : "") +
+        (t.municipio ? `<br><small>${esc(t.municipio)}</small>` : ""))
+      .on("click", () => { if (!montando && t.fazenda_id) abrirFazenda(t.fazenda_id); }));
+  });
+  if (d.resumo && d.resumo.length)
+    mostrarAviso(d.resumo.map(r => `${r.nome}: ${fmt(r.n)} talhões · ${fmt(r.ha)} ha`).join("  |  "));
+}
+
 async function carregarAreas(){
   if (!mapa) return;
   const z = mapa.getZoom();
@@ -1264,7 +1299,7 @@ async function carregarMapa(){
 }
 
 function atualizarTudo(){ carregarResumo(); carregarFazendas(); carregarMapa();
-                          carregarCulturas(); carregarLimite(); carregarPivos(); if (calorLigado) carregarCalor();
+                          carregarCulturas(); carregarLimite(); carregarPivos(); if (calorLigado) carregarCalor(); if (perenesLigado) carregarPerenes();
                           if (!document.getElementById("painelPotencial").hidden) carregarFrota();
                           carregarPotencial().catch(()=>{}).then(carregarPessoas); }
 
@@ -1292,7 +1327,7 @@ async function abrirFazenda(id){
 
     <div class="secao"><h4>Uso do solo (MapBiomas 2023)</h4>
       ${d.culturas.length ? `<table>${d.culturas.map(c=>`
-        <tr><td style="padding:5px 0">🌿 ${esc(c.nome)}</td>
+        <tr><td style="padding:5px 0">🌿 ${esc(aliasCult(c.nome))}</td>
             <td style="padding:5px 0;text-align:right"><b>${fmt(Math.round(c.area_ha))}</b> ha</td></tr>`).join("")}
         ${f.area_vegetacao_nativa_ha ? `<tr><td style="padding:5px 0;color:#7a8794">🌳 Vegetação nativa</td>
             <td style="padding:5px 0;text-align:right;color:#7a8794">${fmt(Math.round(f.area_vegetacao_nativa_ha))} ha</td></tr>`:""}
@@ -1608,7 +1643,7 @@ async function carregarRegras(){
 
 function desenharRegras(){
   const ops = c => potCulturas.map(x =>
-    `<option value="${x.id}" ${String(x.id) === String(c) ? "selected" : ""}>${esc(x.nome)}</option>`).join("");
+    `<option value="${x.id}" ${String(x.id) === String(c) ? "selected" : ""}>${esc(aliasCult(x.nome))}</option>`).join("");
   document.getElementById("tbRegras").innerHTML = potRegras.map((r, i) => `
     <tr>
       <td><select data-i="${i}" data-c="cultura_id">${ops(r.cultura_id)}</select></td>
@@ -1731,9 +1766,11 @@ satelite.addTo(mapa); rotulos.addTo(mapa);
 /* 💧 pivôs centrais (ANA): círculo de área equivalente em cada pivô */
 camadaPivos = L.layerGroup();
 camadaCalor = L.layerGroup();
+camadaPerenes = L.layerGroup();
 L.control.layers(
   {"🛰️ Satélite": satelite, "🗺️ Mapa comum": ruas},
   {"Nomes de cidades": rotulos, "💧 Pivôs de irrigação": camadaPivos,
+   "🌳 Café e laranja": camadaPerenes,
    "🔥 Calor da irrigação": camadaCalor},
   {position: "topright", collapsed: false}
 ).addTo(mapa);
@@ -1745,6 +1782,7 @@ calorLigado = true;
 
 mapa.on("overlayadd", ev => {
   if (ev.layer === camadaPivos){ pivosLigado = true; carregarPivos(); }
+  if (ev.layer === camadaPerenes){ perenesLigado = true; carregarPerenes(); }
   if (ev.layer === camadaCalor){
     calorLigado = true;
     if (camadaMunicipios){ camadaMunicipios.remove(); camadaMunicipios = null; }
@@ -1753,6 +1791,7 @@ mapa.on("overlayadd", ev => {
 });
 mapa.on("overlayremove", ev => {
   if (ev.layer === camadaPivos) pivosLigado = false;
+  if (ev.layer === camadaPerenes){ perenesLigado = false; camadaPerenes.clearLayers(); }
   if (ev.layer === camadaCalor){
     calorLigado = false; legendaCalor(false); camadaCalor.clearLayers();
     carregarAreas();                       // devolve as bolhas/contornos
