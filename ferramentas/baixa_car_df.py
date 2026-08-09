@@ -39,8 +39,9 @@ with open(SAI, "w", encoding="utf-8") as f:
             p, g = x["properties"], x.get("geometry")
             if not g:
                 continue
-            if str(p.get("status_imovel") or "") == "CA":
-                continue   # CAR cancelado: registro morto, terra contada em dobro
+            if str(p.get("status_imovel") or "") in ("CA", "SU"):
+                continue   # cancelado/suspenso: registro morto ou travado,
+                           # terra contada em dobro (pedido do usuario)
             # MultiPolygon -> lista de aneis externos; Polygon -> um so
             aneis = []
             if g["type"] == "MultiPolygon":
