@@ -3516,7 +3516,15 @@ class Handler(BaseHTTPRequestHandler):
                        LEFT JOIN territorio_municipios tm ON tm.territorio_id = t.id
                        LEFT JOIN fazendas f ON f.municipio_id = tm.municipio_id
                        GROUP BY t.id ORDER BY t.nome""").fetchall()
-                return self.send_json(200, [dict(r) for r in rows])
+                saida = []
+                for r in rows:
+                    d = dict(r)
+                    # quais cidades compõem: sem isso não dá para EDITAR clicando
+                    d["municipio_ids"] = [x[0] for x in con.execute(
+                        "SELECT municipio_id FROM territorio_municipios "
+                        "WHERE territorio_id = ?", [r["id"]])]
+                    saida.append(d)
+                return self.send_json(200, saida)
 
             if path == "/atlas-api/territorios" and method == "POST":
                 if not gestor:
@@ -3532,6 +3540,26 @@ class Handler(BaseHTTPRequestHandler):
                     [(cur.lastrowid, m) for m in muns])
                 con.commit()
                 return self.send_json(200, {"ok": True, "id": cur.lastrowid})
+
+            mter_up = re.match(r"^/atlas-api/territorios/(\d+)$", path)
+            if mter_up and method in ("PUT", "PATCH"):
+                if not gestor:
+                    return self.send_json(403, {"erro": "Só gerente/administrador edita territórios"})
+                tid = int(mter_up.group(1))
+                if not con.execute("SELECT 1 FROM territorios WHERE id = ?", [tid]).fetchone():
+                    return self.send_json(404, {"erro": "Território não encontrado"})
+                d = self.read_body()
+                nome = str(d.get("nome") or "").strip()[:80]
+                muns = [int(m) for m in (d.get("municipios") or []) if str(m).isdigit()]
+                if not nome or not muns:
+                    return self.send_json(400, {"erro": "informe nome e ao menos um município"})
+                con.execute("UPDATE territorios SET nome = ? WHERE id = ?", [nome, tid])
+                con.execute("DELETE FROM territorio_municipios WHERE territorio_id = ?", [tid])
+                con.executemany(
+                    "INSERT OR IGNORE INTO territorio_municipios (territorio_id, municipio_id) VALUES (?,?)",
+                    [(tid, m) for m in muns])
+                con.commit()
+                return self.send_json(200, {"ok": True, "id": tid})
 
             mter = re.match(r"^/atlas-api/territorios/(\d+)$", path)
             if mter and method == "DELETE":
@@ -4100,7 +4128,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_PATCH(self):
         parsed = urlparse(self.path)
-        if parsed.path.startswith("/api/"):
+        if parsed.path.startswith("/api/") or parsed.path.startswith("/atlas-api/"):
             return self.handle_api("PATCH", parsed)
         self.send_json(404, {"error": "Nao encontrado"})
 

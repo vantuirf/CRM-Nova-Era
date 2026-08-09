@@ -80,6 +80,24 @@
                background:#eef7ff;border:1px solid #cfe4fa;font-size:13.5px;color:#12325c}
   .familia-box b{font-size:16px}
   .familia-box .cidades{margin-top:6px;color:#4a6b8a;font-size:12.5px}
+  #cartaoMont{position:fixed;left:50%;transform:translateX(-50%);bottom:18px;z-index:1200;
+    background:#fff;border:2px solid #0f7b3f;border-radius:14px;padding:14px 16px;
+    width:min(560px,94vw);box-shadow:0 8px 30px rgba(0,0,0,.25)}
+  .mt-cab{font-weight:700;font-size:14.5px;margin-bottom:8px}
+  .mt-cab small{font-weight:400;color:#7a8794;margin-left:8px}
+  #mtNome{width:100%;padding:8px 10px;border:1px solid var(--borda);border-radius:8px;
+    font-size:14px;margin-bottom:8px}
+  .mt-chips{display:flex;flex-wrap:wrap;gap:6px;max-height:110px;overflow-y:auto;margin-bottom:8px}
+  .mt-chip{background:#e8f2ec;color:#0f7b3f;border:1px solid #bfe0cd;border-radius:20px;
+    padding:3px 8px;font-size:12.5px;white-space:nowrap}
+  .mt-chip b{cursor:pointer;margin-left:5px;color:#a33}
+  .mt-rodape{display:flex;gap:8px;align-items:center}
+  .mt-rodape span{flex:1;font-size:12.5px;color:#5a6b7a}
+  .mt-msg{color:#a33 !important}
+  body.montando #listaMun .mun{border-left:3px solid transparent}
+  body.montando #listaMun .mun:hover{border-left-color:#2ecc71}
+  #listaMun .mun.mont{background:#e8f2ec;border-left:3px solid #0f7b3f !important}
+  #listaMun .mun.mont span::after{content:" ✓";color:#0f7b3f;font-weight:700}
   .abas{display:flex;gap:6px;margin:0 0 14px;border-bottom:1px solid var(--borda)}
   .aba{background:none;border:0;border-bottom:2px solid transparent;padding:9px 16px;
     font-size:14.5px;color:#5a6b7a;cursor:pointer;font-weight:600}
@@ -396,6 +414,19 @@
   </main>
 </div>
 
+<div id="cartaoMont" hidden>
+  <div class="mt-cab">🧩 Montando território
+    <small>clique nas cidades — mapa ou lista</small></div>
+  <input id="mtNome" placeholder="Nome do território (ex: Corredor da Ferrovia)" maxlength="80">
+  <div id="mtChips" class="mt-chips"></div>
+  <div class="mt-rodape">
+    <span id="mtTotais"></span>
+    <span id="mtMsg" class="mt-msg"></span>
+    <button id="mtCancelar" class="bt-sec">Cancelar</button>
+    <button id="mtSalvar" class="bt-pri">Salvar território</button>
+  </div>
+</div>
+
 <div id="fundo"></div>
 <div id="gaveta">
   <div class="cab">
@@ -460,6 +491,8 @@ async function carregarTerritorios(){
   document.getElementById("listaTer").innerHTML = ts.length ? ts.map(t =>
     `<div class="mun ter" data-tid="${t.id}">
        <span>${esc(t.nome)}<br><small>${t.municipios} munic. · ${fmt(t.fazendas)} faz.</small></span>
+       <small onclick='event.stopPropagation();iniciarMontagem(${JSON.stringify({id:t.id,nome:t.nome,municipio_ids:t.municipio_ids})})'
+              style="cursor:pointer" title="Editar clicando nas cidades">✎</small>
        <small onclick="event.stopPropagation();excluirTer(${t.id})" style="cursor:pointer" title="Excluir">✕</small>
      </div>`).join("") : `<small style="color:#9aa6b2">Nenhum ainda.</small>`;
   document.querySelectorAll(".ter").forEach(el => el.onclick = () => {
@@ -477,34 +510,104 @@ async function excluirTer(id){
   carregarTerritorios();
 }
 
-/* criação de território: escolher vários municípios (ex: os cortados pela ferrovia) */
+/* ---------- montagem de território CLICANDO nas cidades ----------
+   Aperta "+ Criar território" (ou o lápis de um existente) e sai clicando:
+   na lista da esquerda ou direto no mapa. Clicou de novo, tira. O cartão
+   flutuante mostra o que já entrou e salva. */
+let montando = false, montId = null, montSel = new Set(), camadaMont = null;
+const contornoMunCache = {};
+
 document.addEventListener("click", e => {
-  if (e.target.id !== "btnNovoTer") return;
-  const cx = document.getElementById("gCorpo");
-  document.getElementById("gNome").textContent = "Novo território";
-  document.getElementById("gCar").textContent = "Marque os municípios que fazem parte";
-  cx.innerHTML = `
-    <div class="form-inline">
-      <input id="ntNome" placeholder="Nome do território (ex: Corredor da Ferrovia)">
-      <input id="ntBusca" placeholder="Filtrar municípios…">
-    </div>
-    <div id="ntLista" style="max-height:52vh;overflow:auto;margin:10px 0;border:1px solid var(--borda);border-radius:8px;padding:8px">
-      ${municipiosCache.filter(m=>m.fazendas>0).map(m=>`
-        <label style="display:flex;gap:8px;padding:4px;font-size:14px;cursor:pointer">
-          <input type="checkbox" value="${m.id}" data-nome="${m.nome.toLowerCase()}">
-          <span>${esc(m.nome)} <small style="color:#9aa6b2">${fmt(m.fazendas)}</small></span>
-        </label>`).join("")}
-    </div>
-    <div class="form-inline"><button onclick="salvarTerritorio()">Criar território</button></div>`;
-  document.getElementById("ntBusca").oninput = ev => {
-    const q = ev.target.value.toLowerCase();
-    cx.querySelectorAll("#ntLista label").forEach(l =>
-      l.style.display = l.querySelector("input").dataset.nome.includes(q) ? "flex" : "none");
-  };
-  document.getElementById("gaveta").classList.add("aberta");
-  document.getElementById("fundo").classList.add("on");
+  if (e.target.id === "btnNovoTer") iniciarMontagem();
 });
-/* ---------- importação de planilhas (.xlsx / .csv) ---------- */
+
+function iniciarMontagem(ter){
+  montando = true;
+  montId = ter ? ter.id : null;
+  montSel = new Set(ter ? ter.municipio_ids : []);
+  if (!camadaMont){ camadaMont = L.layerGroup(); }
+  camadaMont.addTo(mapa);
+  document.getElementById("cartaoMont").hidden = false;
+  document.getElementById("mtNome").value = ter ? ter.nome : "";
+  document.body.classList.add("montando");
+  montSel.forEach(id => desenharContornoMont(id));
+  atualizarCartaoMont();
+  mostrarAviso("clique nas cidades para montar o território — no mapa ou na lista");
+}
+
+function sairMontagem(){
+  montando = false; montId = null; montSel.clear();
+  if (camadaMont){ camadaMont.clearLayers(); camadaMont.remove(); }
+  document.getElementById("cartaoMont").hidden = true;
+  document.body.classList.remove("montando");
+  document.querySelectorAll("#listaMun .mun.mont").forEach(x => x.classList.remove("mont"));
+}
+
+function toggleMont(id){
+  id = Number(id);
+  if (montSel.has(id)){
+    montSel.delete(id);
+    if (camadaMont) camadaMont.eachLayer(l => { if (l.opcoesMunId === id) camadaMont.removeLayer(l); });
+  } else {
+    montSel.add(id);
+    desenharContornoMont(id);
+  }
+  atualizarCartaoMont();
+}
+
+async function desenharContornoMont(id){
+  if (!contornoMunCache[id]){
+    const d = await api("/atlas-api/limite?municipio_id=" + id);
+    contornoMunCache[id] = (d.limites && d.limites[0]) ? d.limites[0].aneis : [];
+  }
+  if (!montando || !montSel.has(Number(id))) return;   // já desistiu enquanto carregava
+  const aneis = contornoMunCache[id];
+  if (!aneis.length) return;
+  const pol = L.polygon(aneis.map(a => a.map(([x, y]) => [y, x])), {
+    color: "#0f7b3f", weight: 3, fillColor: "#2ecc71", fillOpacity: .25
+  }).on("click", () => { if (montando) toggleMont(id); });
+  pol.opcoesMunId = Number(id);
+  camadaMont.addLayer(pol);
+}
+
+function atualizarCartaoMont(){
+  const nomes = [], tot = {cid: 0, faz: 0};
+  municipiosCache.forEach(m => {
+    const el = document.querySelector(`#listaMun .mun[data-id="${m.id}"]`);
+    const dentro = montSel.has(Number(m.id));
+    if (el) el.classList.toggle("mont", dentro);
+    if (dentro){ nomes.push(m); tot.cid++; tot.faz += m.fazendas; }
+  });
+  document.getElementById("mtChips").innerHTML = nomes.length
+    ? nomes.sort((a, b) => b.fazendas - a.fazendas).map(m =>
+        `<span class="mt-chip">${esc(m.nome)}<b onclick="toggleMont(${m.id})" title="Tirar">×</b></span>`).join("")
+    : `<small style="color:#9aa6b2">Nenhuma cidade ainda — clique no mapa ou na lista.</small>`;
+  document.getElementById("mtTotais").textContent =
+    tot.cid ? `${tot.cid} cidade(s) · ${fmt(tot.faz)} fazendas` : "";
+}
+
+document.getElementById("mtSalvar").onclick = async () => {
+  const nome = document.getElementById("mtNome").value.trim();
+  if (!nome || !montSel.size){
+    document.getElementById("mtMsg").textContent = "Dê um nome e clique em pelo menos uma cidade.";
+    return;
+  }
+  const corpo = {nome, municipios: [...montSel]};
+  const d = montId
+    ? await api("/atlas-api/territorios/" + montId, {method: "PATCH",
+        headers: {"Content-Type": "application/json"}, body: JSON.stringify(corpo)})
+    : await api("/atlas-api/territorios", {method: "POST",
+        headers: {"Content-Type": "application/json"}, body: JSON.stringify(corpo)});
+  if (d.erro){ document.getElementById("mtMsg").textContent = d.erro; return; }
+  const novoId = d.id;
+  sairMontagem();
+  await carregarTerritorios();
+  const el = document.querySelector(`.ter[data-tid="${novoId}"]`);   // já abre nele
+  if (el) el.click();
+};
+document.getElementById("mtCancelar").onclick = sairMontagem;
+
+/* ---------- importação de planilhas (.xlsx / .csv) ---------- *//* ---------- importação de planilhas (.xlsx / .csv) ---------- */
 const CAMPOS_IMPORT = [
   ["nome",       "Nome do cliente / empresa", true],
   ["telefone",   "Telefone / WhatsApp", false],
@@ -635,6 +738,7 @@ async function carregarMunicipios(){
   alvo.innerHTML = ms.filter(m=>m.fazendas>0).map(m =>
     `<div class="mun" data-id="${m.id}"><span>${esc(m.nome)}${m.uf!=='GO'?' ('+esc(m.uf)+')':''}</span><small>${fmt(m.fazendas)}</small></div>`).join("");
   document.querySelectorAll(".mun:not(.ter)").forEach(el => el.onclick = () => {
+    if (montando && el.dataset.id){ toggleMont(el.dataset.id); return; }
     document.querySelectorAll(".mun").forEach(x=>x.classList.remove("ativo"));
     el.classList.add("ativo");
     munAtivo = el.dataset.id || ""; terAtivo = ""; pagina = 1;
@@ -744,7 +848,8 @@ async function carregarBolhas(){
              justify-content:center;color:#fff;font-weight:700;
              font-size:${Math.max(10, Math.min(15, r/2))}px">${fmt(m.fazendas)}</div>`
     })}).bindTooltip(`${esc(m.nome)} — ${fmt(m.fazendas)} fazendas · ${fmt(m.area_ha)} ha`)
-      .on("click", () => {   // clicar na bolha entra no município
+      .on("click", () => {   // clicar na bolha entra no município (ou monta)
+        if (montando){ toggleMont(m.id); return; }
         const el = [...document.querySelectorAll("#listaMun .mun")]
           .find(x => x.dataset.id === String(m.id));
         if (el) el.click();
@@ -919,7 +1024,10 @@ async function carregarCalor(){
       camadaCalor.addLayer(L.polygon(c.aneis.map(a => a.map(([x,y]) => [y,x])), {
         color: "#7a2010", weight: 1, opacity: .55,
         fillColor: corCalor(c.fatia), fillOpacity: .62
-      }).bindTooltip(dica).on("click", () => irParaMunicipio(c.id)));
+      }).bindTooltip(dica).on("click", () => {
+        if (montando){ toggleMont(c.id); return; }
+        irParaMunicipio(c.id);
+      }));
     } else if (c.lat){          // sem contorno: bolha proporcional
       const r = 10 + 30 * Math.sqrt(c.fatia);
       camadaCalor.addLayer(L.circleMarker([c.lat, c.lng], {
