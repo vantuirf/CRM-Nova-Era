@@ -80,6 +80,15 @@
                background:#eef7ff;border:1px solid #cfe4fa;font-size:13.5px;color:#12325c}
   .familia-box b{font-size:16px}
   .familia-box .cidades{margin-top:6px;color:#4a6b8a;font-size:12.5px}
+  .legenda-calor{background:rgba(255,255,255,.94);border-radius:8px;padding:9px 11px;
+    font-size:12px;color:#1f2d3a;box-shadow:0 1px 8px rgba(0,0,0,.28);max-width:210px;
+    font-family:system-ui,-apple-system,sans-serif;line-height:1.35}
+  .legenda-calor b{font-size:12.5px}
+  .legenda-calor .escala{display:flex;height:9px;margin:6px 0 3px;border-radius:2px;overflow:hidden}
+  .legenda-calor .escala span{flex:1}
+  .legenda-calor .pontas{display:flex;justify-content:space-between;color:#7a8794;font-size:10.5px}
+  .legenda-calor ol{margin:7px 0 0;padding-left:18px}
+  .legenda-calor li{margin-bottom:1px}
   .socios{background:#fff4e6;border:1px solid #f0dcc0;color:#8a5a00;border-radius:20px;
     padding:2px 8px;font-size:12px;white-space:nowrap}
   .dica-cult{margin:0 14px 10px;padding:8px 12px;border-radius:8px;background:#fff8e6;
@@ -562,7 +571,8 @@ function corDa(cat){
 
 /* De LONGE mostra uma bolha por município com a contagem (assim TODAS as
    fazendas aparecem, não só as 3.000 maiores); de perto, os contornos. */
-let camadaMunicipios, camadaLimite, bboxRecorte = null, camadaPivos, pivosLigado = false, turnoPivos = 0;
+let camadaMunicipios, camadaLimite, bboxRecorte = null, camadaPivos, pivosLigado = false, turnoPivos = 0,
+    camadaCalor, calorLigado = false;
 // cada pedido de camada leva um número; resposta de pedido antigo é jogada
 // fora (senão o mapa pinta o recorte/zoom anterior por cima do atual)
 let turnoCamada = 0;   // bbox das fazendas do recorte atual
@@ -603,6 +613,7 @@ async function carregarBolhas(){
   if (meu !== turnoCamada) return;         // o usuário já mudou de visão
   if (camadaMunicipios){ camadaMunicipios.remove(); camadaMunicipios = null; }
   const maior = Math.max(1, ...d.map(m => m.fazendas));
+  if (calorLigado) return;      // o calor ja fala por município; bolha em cima tapa
   camadaMunicipios = L.layerGroup(d.filter(m => m.lat).map(m => {
     const r = 12 + 26 * Math.sqrt(m.fazendas / maior);
     return L.marker([m.lat, m.lng], {icon: L.divIcon({
@@ -620,6 +631,68 @@ async function carregarBolhas(){
       });
   })).addTo(mapa);
   mostrarAviso(`${fmt(d.reduce((a,m)=>a+m.fazendas,0))} fazendas em ${d.length} municípios — aproxime para ver uma a uma`);
+}
+
+/* 🔥 Mapa de calor: pinta cada CIDADE conforme a área irrigada por pivô que
+   ela tem. A escala é relativa ao maior município do recorte. */
+const CORES_CALOR = ["#fff5eb","#fee0b6","#fdae61","#f46d43","#d73027","#8c0f1d"];
+function corCalor(f){                       // f = 0..1, escala de raiz para o
+  const i = Math.min(CORES_CALOR.length - 1,  // meio da faixa não sumir
+                     Math.floor(Math.sqrt(f) * CORES_CALOR.length));
+  return CORES_CALOR[i];
+}
+
+async function carregarCalor(){
+  const ps = new URLSearchParams();
+  if (terAtivo) ps.set("territorio_id", terAtivo);
+  else if (munAtivo) ps.set("municipio_id", munAtivo);
+  const d = await api("/atlas-api/calor?" + ps);
+  camadaCalor.clearLayers();
+  if (!calorLigado) return;
+  if (d.sem_pivos || !d.cidades.length){ legendaCalor(false); return; }
+  d.cidades.forEach(c => {
+    const dica = `<b>${esc(c.nome)}${c.uf === "DF" ? " (DF)" : ""}</b>` +
+                 `<br>${fmt(c.area_ha)} ha irrigados` +
+                 `<br>${fmt(c.pivos)} pivôs · média de ${fmt(c.media_ha)} ha`;
+    if (c.aneis && c.aneis.length){
+      camadaCalor.addLayer(L.polygon(c.aneis.map(a => a.map(([x,y]) => [y,x])), {
+        color: "#7a2010", weight: 1, opacity: .55,
+        fillColor: corCalor(c.fatia), fillOpacity: .62
+      }).bindTooltip(dica).on("click", () => irParaMunicipio(c.id)));
+    } else if (c.lat){          // sem contorno: bolha proporcional
+      const r = 10 + 30 * Math.sqrt(c.fatia);
+      camadaCalor.addLayer(L.circleMarker([c.lat, c.lng], {
+        radius: r/2, color: "#7a2010", weight: 1,
+        fillColor: corCalor(c.fatia), fillOpacity: .7
+      }).bindTooltip(dica));
+    }
+  });
+  camadaCalor.bringToBack && camadaCalor.bringToBack();
+  legendaCalor(true, d);
+}
+
+let caixaLegenda;
+function legendaCalor(mostrar, d){
+  if (!mostrar){ if (caixaLegenda){ caixaLegenda.remove(); caixaLegenda = null; } return; }
+  if (!caixaLegenda){
+    caixaLegenda = L.control({position: "bottomleft"});
+    caixaLegenda.onAdd = () => {
+      const el = L.DomUtil.create("div", "legenda-calor");
+      el.id = "legCalor";
+      return el;
+    };
+    caixaLegenda.addTo(mapa);
+  }
+  const alvo = document.getElementById("legCalor");
+  if (!alvo) return;
+  const top = d.cidades.slice(0, 5);
+  alvo.innerHTML =
+    `<b>Área irrigada por cidade</b>` +
+    `<div class="escala">` + CORES_CALOR.map(c =>
+      `<span style="background:${c}"></span>`).join("") + `</div>` +
+    `<div class="pontas"><span>menos</span><span>${fmt(d.maior_area_ha)} ha</span></div>` +
+    `<ol>` + top.map(c =>
+      `<li><b>${esc(c.nome)}</b> ${fmt(c.area_ha)} ha</li>`).join("") + `</ol>`;
 }
 
 /* Pivôs do recorte: o contador do topo é sempre do recorte inteiro; os
@@ -674,6 +747,11 @@ async function carregarAreas(){
   if (!recorte && z < ZOOM_PONTOS){        // de longe: bolhas por município
     if (camadaAreas){ camadaAreas.remove(); camadaAreas = null; }
     if (camadaPontos && mapa.hasLayer(camadaPontos)) camadaPontos.remove();
+    if (calorLigado){                     // o calor ocupa esta mesma leitura
+      if (camadaMunicipios){ camadaMunicipios.remove(); camadaMunicipios = null; }
+      mostrarAviso("mapa de calor por cidade — desligue a camada para ver as fazendas");
+      return;
+    }
     await carregarBolhas();
     return;
   }
@@ -794,7 +872,7 @@ async function carregarMapa(){
 }
 
 function atualizarTudo(){ carregarResumo(); carregarFazendas(); carregarMapa();
-                          carregarCulturas(); carregarLimite(); carregarPivos();
+                          carregarCulturas(); carregarLimite(); carregarPivos(); if (calorLigado) carregarCalor();
                           carregarPotencial().catch(()=>{}).then(carregarPessoas); }
 
 async function abrirFazenda(id){
@@ -1259,14 +1337,34 @@ satelite.addTo(mapa); rotulos.addTo(mapa);
 
 /* 💧 pivôs centrais (ANA): círculo de área equivalente em cada pivô */
 camadaPivos = L.layerGroup();
+camadaCalor = L.layerGroup();
 L.control.layers(
   {"🛰️ Satélite": satelite, "🗺️ Mapa comum": ruas},
-  {"Nomes de cidades": rotulos, "💧 Pivôs de irrigação": camadaPivos},
+  {"Nomes de cidades": rotulos, "💧 Pivôs de irrigação": camadaPivos,
+   "🔥 Calor da irrigação": camadaCalor},
   {position: "topright", collapsed: false}
 ).addTo(mapa);
 
-mapa.on("overlayadd", ev => { if (ev.layer === camadaPivos){ pivosLigado = true; carregarPivos(); } });
-mapa.on("overlayremove", ev => { if (ev.layer === camadaPivos) pivosLigado = false; });
+/* O calor é a visão de abertura da Prospecção: mostra de cara onde está a
+   irrigação. As fazendas (bolhas/contornos) voltam desligando esta camada. */
+camadaCalor.addTo(mapa);
+calorLigado = true;
+
+mapa.on("overlayadd", ev => {
+  if (ev.layer === camadaPivos){ pivosLigado = true; carregarPivos(); }
+  if (ev.layer === camadaCalor){
+    calorLigado = true;
+    if (camadaMunicipios){ camadaMunicipios.remove(); camadaMunicipios = null; }
+    carregarCalor();
+  }
+});
+mapa.on("overlayremove", ev => {
+  if (ev.layer === camadaPivos) pivosLigado = false;
+  if (ev.layer === camadaCalor){
+    calorLigado = false; legendaCalor(false); camadaCalor.clearLayers();
+    carregarAreas();                       // devolve as bolhas/contornos
+  }
+});
 
 /* ao arrastar ou dar zoom, recarrega os contornos da nova área */
 mapa.on("moveend zoomend", () => {

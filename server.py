@@ -317,6 +317,10 @@ def atlas_boot():
         con.execute("CREATE INDEX IF NOT EXISTS idx_fc_faz_cult "
                     "ON fazenda_culturas(fazenda_id, cultura_id)")
         con.execute("CREATE INDEX IF NOT EXISTS idx_fp_faz ON fazenda_pessoas(fazenda_id)")
+        # municipios e culturas tambem vieram sem chave do export
+        con.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_mun_id ON municipios(id)")
+        con.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_cult_id ON culturas(id)")
+        con.execute("ANALYZE")     # sem estatisticas o otimizador chuta o plano
         # MIGRACAO CRITICA: o export "CREATE TABLE AS SELECT" perdeu a chave
         # primaria de pessoas — sem ela, lastrowid NAO corresponde ao campo id
         # e um contato novo apontaria para OUTRA pessoa (ou sumiria). Reconstroi
@@ -3307,28 +3311,41 @@ class Handler(BaseHTTPRequestHandler):
                     pessoas.append(d)
                 # Quando há mínimo por produtor, os totais só podem contar
                 # quem passou no corte — senão o resumo mostraria a região toda.
-                filtro_pes, pfil = "", []
+                # A lista de quem passou é resolvida UMA vez, numa tabela
+                # temporária: repetir a subconsulta agrupada em cada total fazia
+                # o SQLite escolher um plano que varre a região inteira (a
+                # consulta passava de 3 minutos com a cultura mais comum).
+                # Com o corte por produtor, quem manda na consulta e a lista de
+                # quem passou (poucos milhares), nao o escopo (a cultura mais
+                # comum tem 208 mil fazendas). O CROSS JOIN fixa essa ordem: sem
+                # ele o SQLite comecava pelo escopo e a conta levava 3 minutos.
+                base_tot, pfil = base, []
                 if having:
-                    filtro_pes = " AND p.id IN (SELECT p.id " + base + " GROUP BY p.id" + having + ")"
-                    pfil = params + phav
+                    con.execute("CREATE TEMP TABLE IF NOT EXISTS sel_pes (pid INTEGER PRIMARY KEY)")
+                    con.execute("DELETE FROM sel_pes")
+                    con.execute("INSERT INTO sel_pes (pid) SELECT p.id " + base +
+                                " GROUP BY p.id" + having, params + phav)
+                    base_tot = ("FROM sel_pes s CROSS JOIN pessoas p ON p.id = s.pid "
+                                "JOIN fazenda_pessoas fp ON fp.pessoa_id = p.id "
+                                "JOIN fazendas f ON f.id = fp.fazenda_id "
+                                "LEFT JOIN municipios m ON m.id = f.municipio_id WHERE " + wtudo)
                 # totais do grupo sobre fazendas DISTINTAS: uma fazenda com dois
                 # donos apareceria duas vezes e dobraria a área da família
-                res_p = con.execute("SELECT COUNT(DISTINCT p.id) AS pessoas " + base + filtro_pes,
-                                    params + pfil).fetchone()
+                res_p = con.execute("SELECT COUNT(DISTINCT p.id) AS pessoas " + base_tot, params).fetchone()
                 colca = (", " + col_cult + " AS ca") if cult.isdigit() else ""
                 res_f = con.execute(
                     "SELECT COUNT(*) AS fazendas, ROUND(SUM(area_total_ha)) AS area_ha"
                     + (", ROUND(SUM(ca)) AS area_cultura_ha" if cult.isdigit() else "") +
                     " FROM (SELECT DISTINCT f.id, f.area_total_ha" + colca + " " +
-                    base + filtro_pes + ")",
-                    (psel[:1] if cult.isdigit() else []) + params + pfil).fetchone()
+                    base_tot + ")",
+                    (psel[:1] if cult.isdigit() else []) + params).fetchone()
                 resumo = dict(res_p or {})
                 resumo.update(dict(res_f or {}))
                 cidades = con.execute(
                     "SELECT m.nome, COUNT(DISTINCT f.id) AS fazendas, "
-                    "COUNT(DISTINCT p.id) AS pessoas " + base + filtro_pes +
+                    "COUNT(DISTINCT p.id) AS pessoas " + base_tot +
                     " AND m.nome IS NOT NULL GROUP BY m.id "
-                    "ORDER BY COUNT(DISTINCT f.id) DESC LIMIT 12", params + pfil).fetchall()
+                    "ORDER BY COUNT(DISTINCT f.id) DESC LIMIT 12", params).fetchall()
                 # O Atlas so tem NOME de dono em parte dos municipios (o SICAR
                 # nao publica proprietario). Sem esse aviso, o painel vazio
                 # parece defeito quando na verdade e falta de dado na regiao.
@@ -3487,6 +3504,55 @@ class Handler(BaseHTTPRequestHandler):
                     "mostrando": len(pivos), "atuais": ativos["n"] or 0,
                     "ultimo_levantamento": ultimo,
                     "fonte": "ANA — Levantamento da Agricultura Irrigada por Pivôs Centrais"})
+
+            if path == "/atlas-api/calor" and method == "GET":
+                # Mapa de calor por cidade: quanto de area irrigada por pivo cada
+                # municipio tem. Devolve o contorno junto para pintar o poligono
+                # inteiro — "cidade com mais area irrigada" e uma pergunta de
+                # municipio, nao de ponto solto no mapa.
+                if "pivos" not in tabs:
+                    return self.send_json(200, {"cidades": [], "sem_pivos": True})
+                tem_lim = bool(con.execute("SELECT 1 FROM sqlite_master WHERE type='table' "
+                                           "AND name='municipio_contorno'").fetchone())
+                cond, params = ["1=1"], []
+                ter = (qs.get("territorio_id") or [""])[0]
+                mun = (qs.get("municipio_id") or [""])[0]
+                if ter.isdigit():
+                    cond.append("p.municipio_id IN (SELECT municipio_id FROM "
+                                "territorio_municipios WHERE territorio_id = ?)")
+                    params.append(int(ter))
+                elif mun.isdigit():
+                    cond.append("p.municipio_id = ?")
+                    params.append(int(mun))
+                rows = con.execute(
+                    "SELECT m.id, m.nome, m.uf, COUNT(*) AS pivos, "
+                    "ROUND(SUM(p.ha)) AS area_ha, ROUND(AVG(p.ha),1) AS media_ha, "
+                    "AVG(p.lat) AS lat, AVG(p.lng) AS lng "
+                    "FROM pivos p JOIN municipios m ON m.id = p.municipio_id "
+                    "WHERE " + " AND ".join(cond) +
+                    " GROUP BY m.id ORDER BY SUM(p.ha) DESC", params).fetchall()
+                lim = {}
+                if tem_lim and rows:
+                    ids = [r["id"] for r in rows]
+                    for c in con.execute(
+                            "SELECT municipio_id, geojson FROM municipio_contorno "
+                            "WHERE municipio_id IN (%s)" % ",".join("?" * len(ids)), ids):
+                        try:
+                            lim[c["municipio_id"]] = json.loads(c["geojson"])
+                        except Exception:
+                            continue
+                maior = max((r["area_ha"] or 0) for r in rows) if rows else 0
+                cidades = []
+                for r in rows:
+                    d = dict(r)
+                    d["fatia"] = round((r["area_ha"] or 0) / maior, 4) if maior else 0
+                    d["aneis"] = lim.get(r["id"])
+                    cidades.append(d)
+                return self.send_json(200, {
+                    "cidades": cidades,
+                    "maior_area_ha": maior,
+                    "total_area_ha": sum((r["area_ha"] or 0) for r in rows),
+                    "total_pivos": sum(r["pivos"] for r in rows)})
 
             if path == "/atlas-api/potencial" and method == "GET":
                 # Potencial comercial do recorte: "a cada X ha da cultura Y
