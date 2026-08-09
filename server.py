@@ -1930,38 +1930,93 @@ MAX_REGRAS_ATIVAS = 12
 
 # Frota: quantos drones a regiao comporta em um ano, pelo tanto de hectare
 # APLICADO (area x aplicacoes), e nao pelo tanto de area plantada.
+#
+# Duas contas separadas, porque a realidade e separada:
+#  - PIVO: safra o ano todo (chove garantido). A MESMA terra roda uma sucessao
+#    de culturas no ano — soja 10 apl + milho 10 + feijao 15 = 35 aplicacoes
+#    sobre a area irrigada.
+#  - SEQUEIRO: cultura a cultura. A safrinha nao e uma area nova: e uma FRACAO
+#    da area de soja replantada (milho em ~70%, depois sorgo em parte)."""
 FROTA_PADRAO = {
     "drone_valor": 180000.0,      # R$ por drone
     "drone_ha_ano": 4000.0,       # hectares que um drone aplica por ano
-    "pivo_aplicacoes": 12.0,      # area irrigada aplica o ano todo
     "manutencao_modo": "percentual",   # percentual | por_ha | fixo
     "manutencao_valor": 12.0,
-    "culturas": {},               # {cultura_id: {"aplicacoes": n, "fatia": %}}
+    # sucessao de safras NA AREA IRRIGADA (numeros do proprio usuario)
+    "pivo_safras": [
+        {"nome": "Soja", "aplicacoes": 10.0},
+        {"nome": "Milho", "aplicacoes": 10.0},
+        {"nome": "Feijão", "aplicacoes": 15.0},
+    ],
+    # sequeiro: cada linha diz DE ONDE vem a area (cultura do MapBiomas),
+    # que fatia dela entra, e quantas aplicacoes leva
+    "sequeiro": [
+        {"nome": "Soja", "base_id": 1, "fatia": 100.0, "aplicacoes": 8.0},
+        {"nome": "Milho safrinha", "base_id": 1, "fatia": 70.0, "aplicacoes": 6.0},
+        {"nome": "Sorgo", "base_id": 1, "fatia": 20.0, "aplicacoes": 5.0},
+        {"nome": "Pastagem", "base_id": 8, "fatia": 30.0, "aplicacoes": 2.0},
+        {"nome": "Algodão", "base_id": 3, "fatia": 100.0, "aplicacoes": 40.0},
+    ],
 }
 
 
+def _frota_linhas(bruto, com_base):
+    """Valida uma lista de safras/linhas vinda do usuario."""
+    limpo = []
+    for r in (bruto or [])[:20]:
+        if not isinstance(r, dict):
+            continue
+        nome = str(r.get("nome") or "").strip()[:40]
+        ap = _num_pos(r.get("aplicacoes"), 60)
+        if not nome or ap <= 0:
+            continue
+        linha = {"nome": nome, "aplicacoes": ap}
+        if com_base:
+            if not str(r.get("base_id") or "").lstrip("-").isdigit():
+                continue
+            linha["base_id"] = int(r["base_id"])
+            linha["fatia"] = min(_num_pos(r.get("fatia") if r.get("fatia") is not None else 100, 100) or 0, 100)
+        limpo.append(linha)
+    return limpo
+
+
 def frota_config():
-    """Configuracao da conta de frota, com os padroes preenchidos."""
-    c = dict(FROTA_PADRAO)
-    c["culturas"] = {}
+    """Configuracao da conta de frota. Migra sozinho o formato antigo
+    (um numero unico de aplicacoes no pivo + culturas simples)."""
+    c = {k: (list(v) if isinstance(v, list) else v) for k, v in FROTA_PADRAO.items()}
     salvo = _db.get("settings", {}).get("frota")
     if isinstance(salvo, dict):
-        for k in ("drone_valor", "drone_ha_ano", "pivo_aplicacoes", "manutencao_valor"):
-            v = _num_pos(salvo.get(k), 1e12)
-            if v > 0 or k == "manutencao_valor":
-                c[k] = v
+        for k, teto in (("drone_valor", 1e12), ("drone_ha_ano", 1e7), ("manutencao_valor", 1e12)):
+            if k in salvo:
+                c[k] = _num_pos(salvo.get(k), teto)
         modo = str(salvo.get("manutencao_modo") or "")
         if modo in ("percentual", "por_ha", "fixo"):
             c["manutencao_modo"] = modo
-        cults = salvo.get("culturas")
-        if isinstance(cults, dict):
-            for cid, v in cults.items():
+        if "pivo_safras" in salvo or "sequeiro" in salvo:      # formato novo
+            c["pivo_safras"] = _frota_linhas(salvo.get("pivo_safras"), com_base=False)
+            c["sequeiro"] = _frota_linhas(salvo.get("sequeiro"), com_base=True)
+        elif "culturas" in salvo:                              # formato antigo
+            ap = _num_pos(salvo.get("pivo_aplicacoes"), 60)
+            c["pivo_safras"] = ([{"nome": "Aplicações no pivô", "aplicacoes": ap}] if ap > 0 else [])
+            seq = []
+            nomes = {}
+            try:
+                con = atlas_con()
+                nomes = {str(r[0]): r[1] for r in con.execute("SELECT id, nome FROM culturas")}
+                con.close()
+            except Exception:
+                pass
+            for cid, v in (salvo.get("culturas") or {}).items():
                 if not str(cid).isdigit() or not isinstance(v, dict):
                     continue
-                c["culturas"][str(cid)] = {
-                    "aplicacoes": _num_pos(v.get("aplicacoes"), 60),
-                    "fatia": min(_num_pos(v.get("fatia"), 100) or 100, 100),
-                }
+                a = _num_pos(v.get("aplicacoes"), 60)
+                if a <= 0:
+                    continue
+                seq.append({"nome": nomes.get(str(cid), "Cultura " + str(cid)),
+                            "base_id": int(cid),
+                            "fatia": min(_num_pos(v.get("fatia") if v.get("fatia") is not None else 100, 100) or 100, 100),
+                            "aplicacoes": a})
+            c["sequeiro"] = seq
     if c["drone_ha_ano"] <= 0:
         c["drone_ha_ano"] = FROTA_PADRAO["drone_ha_ano"]
     return c
@@ -3544,14 +3599,16 @@ class Handler(BaseHTTPRequestHandler):
                     "fonte": "ANA — Levantamento da Agricultura Irrigada por Pivôs Centrais"})
 
             if path == "/atlas-api/frota" and method == "GET":
-                # Quantos drones a regiao comporta em um ano. A conta e por
-                # HECTARE APLICADO (area x aplicacoes no ano), nao por area
-                # plantada: e o uso que gasta o drone e vende a proxima peca.
+                # Quantos drones a regiao consome por ano. Hectare APLICADO
+                # (area x aplicacoes), em duas contas separadas:
+                #  - pivo: a MESMA area roda uma sucessao de safras no ano
+                #    (ex.: soja 10 + milho 10 + feijao 15 = 35 aplicacoes);
+                #  - sequeiro: cultura a cultura, com a safrinha entrando como
+                #    fracao da area BASE (milho em 70% da soja, sorgo depois).
                 cfg = frota_config()
                 w, p = self._atlas_escopo(qs)
                 safra = " AND fc.safra = (SELECT MAX(safra) FROM fazenda_culturas) AND "
-                # area irrigada do recorte: ela aplica o ano todo e NAO pode ser
-                # contada de novo dentro da cultura (o pivo esta plantado com algo)
+                # area irrigada do recorte
                 irr = 0.0
                 if "pivos" in tabs:
                     cond_p, pp = ["1=1"], []
@@ -3567,7 +3624,7 @@ class Handler(BaseHTTPRequestHandler):
                     r = con.execute("SELECT COALESCE(SUM(ha),0) AS ha FROM pivos WHERE "
                                     + " AND ".join(cond_p), pp).fetchone()
                     irr = float(r["ha"] or 0)
-                # area de cada cultura no recorte
+                # area plantada de cada cultura no recorte
                 areas = {}
                 for r in con.execute(
                         "SELECT c.id, c.nome, COALESCE(SUM(fc.area_ha),0) AS ha "
@@ -3575,25 +3632,35 @@ class Handler(BaseHTTPRequestHandler):
                         "JOIN fazendas f ON f.id = fc.fazenda_id "
                         "WHERE 1=1" + safra + w + " GROUP BY c.id", p).fetchall():
                     areas[str(r["id"])] = {"nome": r["nome"], "ha": float(r["ha"] or 0)}
-                # a area irrigada sai proporcionalmente das culturas, para nao contar duas vezes
                 total_lavoura = sum(a["ha"] for a in areas.values()) or 1.0
-                itens, ha_ano = [], 0.0
-                for cid, conf in cfg["culturas"].items():
-                    a_ = areas.get(cid)
-                    if not a_ or conf["aplicacoes"] <= 0:
+
+                # ---- pivo: sucessao de safras sobre a MESMA area irrigada ----
+                pivo_itens, apl_pivo = [], 0.0
+                for s in cfg["pivo_safras"]:
+                    ha = irr * s["aplicacoes"]
+                    apl_pivo += s["aplicacoes"]
+                    pivo_itens.append({"nome": s["nome"], "aplicacoes": s["aplicacoes"],
+                                       "ha_aplicados_ano": round(ha)})
+                ha_pivo = irr * apl_pivo
+
+                # ---- sequeiro: cada linha parte da area BASE (ja sem o pivo) ----
+                seq_itens, ha_seq = [], 0.0
+                for r in cfg["sequeiro"]:
+                    a_ = areas.get(str(r["base_id"]))
+                    if not a_ or r["aplicacoes"] <= 0:
                         continue
-                    area_c = a_["ha"] * (conf["fatia"] / 100.0)
-                    fatia_irr = min(irr * (a_["ha"] / total_lavoura), area_c)
-                    sequeiro = max(area_c - fatia_irr, 0.0)
-                    ha_seq = sequeiro * conf["aplicacoes"]
-                    ha_ano += ha_seq
-                    itens.append({"cultura_id": int(cid), "cultura": a_["nome"],
-                                  "area_ha": round(a_["ha"]),
-                                  "fatia": conf["fatia"], "aplicacoes": conf["aplicacoes"],
-                                  "area_considerada_ha": round(sequeiro),
-                                  "ha_aplicados_ano": round(ha_seq)})
-                ha_pivo = irr * cfg["pivo_aplicacoes"]
-                ha_ano += ha_pivo
+                    # a fatia irrigada da base ja foi contada nas safras do pivo
+                    base_seq = max(a_["ha"] - irr * (a_["ha"] / total_lavoura), 0.0)
+                    area_cons = base_seq * (r["fatia"] / 100.0)
+                    ha = area_cons * r["aplicacoes"]
+                    ha_seq += ha
+                    seq_itens.append({"nome": r["nome"], "base": a_["nome"],
+                                      "base_id": r["base_id"],
+                                      "base_ha": round(base_seq),
+                                      "fatia": r["fatia"], "aplicacoes": r["aplicacoes"],
+                                      "area_considerada_ha": round(area_cons),
+                                      "ha_aplicados_ano": round(ha)})
+                ha_ano = ha_pivo + ha_seq
                 drones = math.ceil(ha_ano / cfg["drone_ha_ano"]) if ha_ano > 0 else 0
                 valor_drones = drones * cfg["drone_valor"]
                 modo = cfg["manutencao_modo"]
@@ -3605,17 +3672,22 @@ class Handler(BaseHTTPRequestHandler):
                     manut = drones * cfg["manutencao_valor"]
                 return self.send_json(200, {
                     "config": cfg,
-                    "culturas": sorted(itens, key=lambda x: -x["ha_aplicados_ano"]),
-                    "irrigado": {"area_ha": round(irr), "aplicacoes": cfg["pivo_aplicacoes"],
-                                 "ha_aplicados_ano": round(ha_pivo)},
+                    "pivo": {"area_ha": round(irr), "aplicacoes_ano": apl_pivo,
+                             "itens": pivo_itens, "ha_aplicados_ano": round(ha_pivo)},
+                    "sequeiro": sorted(seq_itens, key=lambda x: -x["ha_aplicados_ano"]),
                     "ha_aplicados_ano": round(ha_ano),
                     "drones": drones,
                     "valor_drones": round(valor_drones, 2),
                     "manutencao_ano": round(manut, 2),
                     "total_ano": round(valor_drones + manut, 2),
-                    "lista_culturas": [{"id": int(k), "nome": v["nome"], "area_ha": round(v["ha"])}
-                                       for k, v in sorted(areas.items(),
-                                                          key=lambda kv: -kv[1]["ha"])]})
+                    # TODAS as culturas, mesmo com 0 ha no recorte: senao o
+                    # seletor "area vem de" cai na primeira opcao em silencio
+                    # quando a cultura nao existe naquela cidade
+                    "lista_culturas": [
+                        {"id": r["id"], "nome": r["nome"],
+                         "area_ha": round(areas.get(str(r["id"]), {"ha": 0})["ha"])}
+                        for r in con.execute(
+                            "SELECT id, nome FROM culturas ORDER BY nome").fetchall()]})
 
             if path == "/atlas-api/calor" and method == "GET":
                 # Mapa de calor por cidade: quanto de area irrigada por pivo cada
@@ -4592,7 +4664,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(400, {"error": "Corpo invalido"})
             cfg = {}
             for k, teto in (("drone_valor", 1e12), ("drone_ha_ano", 1e7),
-                            ("pivo_aplicacoes", 60), ("manutencao_valor", 1e12)):
+                            ("manutencao_valor", 1e12)):
                 if k in body:
                     try:
                         v = float(body.get(k) or 0)
@@ -4607,25 +4679,30 @@ class Handler(BaseHTTPRequestHandler):
             if modo not in ("percentual", "por_ha", "fixo"):
                 return self.send_json(400, {"error": "Forma de calcular a manutenção inválida"})
             cfg["manutencao_modo"] = modo
-            cults = body.get("culturas")
-            limpo = {}
-            if isinstance(cults, dict):
-                if len(cults) > 30:
-                    return self.send_json(400, {"error": "Culturas demais"})
-                for cid, v in cults.items():
-                    if not str(cid).isdigit() or not isinstance(v, dict):
-                        continue
+            # as listas: safras do pivo (nome + aplicacoes) e sequeiro
+            # (nome + de-onde-vem-a-area + % + aplicacoes)
+            for campo, com_base in (("pivo_safras", False), ("sequeiro", True)):
+                bruto = body.get(campo)
+                if bruto is None:
+                    continue
+                if not isinstance(bruto, list) or len(bruto) > 20:
+                    return self.send_json(400, {"error": "Até 20 linhas em " + campo})
+                for r in bruto:
+                    if not isinstance(r, dict):
+                        return self.send_json(400, {"error": "Linha inválida em " + campo})
                     try:
-                        ap = float(v.get("aplicacoes") or 0)
-                        fa = float(v.get("fatia") if v.get("fatia") is not None else 100)
+                        ap = float(r.get("aplicacoes") or 0)
+                        fa = float(r.get("fatia") if r.get("fatia") is not None else 100)
                     except (TypeError, ValueError):
                         return self.send_json(400, {"error": "Aplicações e área precisam ser números"})
                     if not (math.isfinite(ap) and math.isfinite(fa)) or ap < 0 or ap > 60 \
                        or fa < 0 or fa > 100:
                         return self.send_json(400, {"error":
                             "Aplicações de 0 a 60 por ano; área de 0 a 100%"})
-                    limpo[str(cid)] = {"aplicacoes": ap, "fatia": fa}
-            cfg["culturas"] = limpo
+                    if com_base and not str(r.get("base_id") or "").isdigit():
+                        return self.send_json(400, {"error":
+                            "Cada linha do sequeiro precisa dizer de onde vem a área"})
+                cfg[campo] = _frota_linhas(bruto, com_base)
             with _lock:
                 _db.setdefault("settings", {})["frota"] = cfg
                 save_db()

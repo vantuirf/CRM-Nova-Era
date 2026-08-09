@@ -102,6 +102,16 @@
   .lista-cult{display:grid;gap:7px}
   .linha-cult{display:grid;grid-template-columns:1fr 58px 58px;gap:6px;align-items:center;
     font-size:12.5px}
+  .linha-cult.c2{grid-template-columns:1fr 58px 26px}
+  .linha-cult.c4{grid-template-columns:1fr 96px 44px 44px 26px}
+  .cab-cult.c2{grid-template-columns:1fr 58px 26px}
+  .cab-cult.c4{grid-template-columns:1fr 96px 44px 44px 26px}
+  .linha-cult select{width:100%;padding:5px 4px;border:1px solid var(--borda);border-radius:6px;
+    font-size:11.5px;background:#fff}
+  .linha-cult .tira{background:none;border:0;color:#a33;cursor:pointer;font-size:15px;padding:0}
+  .btzinho{margin-top:6px;font-size:12px;padding:5px 10px}
+  .tab-frota tr.tit td{background:#f2f7fa;font-weight:700;font-size:12.5px;color:#2a5f92}
+  .tab-frota tr.sub td{color:#5a6b7a}
   .linha-cult b{font-weight:600}
   .linha-cult small{display:block;color:#9aa6b2;font-size:11px}
   .linha-cult input{width:100%;padding:5px 6px;border:1px solid var(--borda);border-radius:6px;
@@ -333,21 +343,26 @@
           <p class="pot-dica">A conta é por <b>hectare aplicado no ano</b> — área × número de
             aplicações. É o uso que gasta o drone e vende a próxima peça.</p>
 
-          <label class="campo-f">Um drone aplica por ano
-            <span class="ajuda">quantos hectares um drone dá conta em um ano</span>
+          <label class="campo-f">A cada quantos ha aplicados se consome um drone
             <input id="fDroneHa" type="number" min="1" step="100"> <small>ha/ano</small>
           </label>
           <label class="campo-f">Preço do drone
             <input id="fDroneValor" type="number" min="0" step="1000"> <small>R$</small>
           </label>
-          <label class="campo-f">Área com pivô: aplicações por ano
-            <span class="ajuda">quem tem pivô aplica o ano todo</span>
-            <input id="fPivoApl" type="number" min="0" max="60" step="1"> <small>por ano</small>
-          </label>
 
-          <h4>Aplicações por cultura</h4>
-          <p class="pot-dica">A safrinha não ocupa a área toda — ajuste o "% da área".</p>
-          <div id="fCulturas" class="lista-cult"></div>
+          <h4>💧 Na área com pivô — safra o ano todo</h4>
+          <p class="pot-dica">A mesma terra roda várias culturas no ano. Escreva a sucessão
+            e as aplicações de cada uma (ex.: soja 10, milho 10, feijão 15).</p>
+          <div class="cab-cult c2"><span>Cultura no pivô</span><span>Apl.</span><span></span></div>
+          <div id="fPivoSafras" class="lista-cult"></div>
+          <button id="btAddPivo" class="bt-sec btzinho">+ safra no pivô</button>
+
+          <h4>🌱 No sequeiro — cultura a cultura</h4>
+          <p class="pot-dica">A safrinha entra como <b>parte da área de outra cultura</b>:
+            milho em 70% da soja, sorgo depois. Pastagem: só a fatia que recebe aplicação.</p>
+          <div class="cab-cult c4"><span>Nome</span><span>Área vem de</span><span>%</span><span>Apl.</span></div>
+          <div id="fSequeiro" class="lista-cult"></div>
+          <button id="btAddSeq" class="bt-sec btzinho">+ linha no sequeiro</button>
 
           <h4>Peças e manutenção</h4>
           <select id="fManutModo">
@@ -754,57 +769,103 @@ const rs = v => "R$ " + Number(v || 0).toLocaleString("pt-BR", {maximumFractionD
 
 async function carregarFrota(){
   const d = await api("/atlas-api/frota?" + escopo());
-  frotaCfg = d.config;
+  frotaCfg = JSON.parse(JSON.stringify(d.config));
   frotaCults = d.lista_culturas;
-  desenharConfigFrota(d);
+  desenharConfigFrota();
   const onde = terAtivo || munAtivo
     ? document.getElementById("subtitulo").textContent : "Goiás e DF";
   document.getElementById("frotaResumo").innerHTML = `
-    <div class="cx"><b>${fmt(d.drones)}</b><span>drones que a região comporta por ano</span></div>
+    <div class="cx"><b>${fmt(d.drones)}</b><span>drones que ${esc(onde)} consome por ano</span></div>
     <div class="cx"><b>${rs(d.valor_drones)}</b><span>em drones</span></div>
     <div class="cx azul"><b>${rs(d.manutencao_ano)}</b><span>em peças e manutenção por ano</span></div>
     <div class="cx"><b>${rs(d.total_ano)}</b><span>total no primeiro ano</span></div>`;
-  const ir = d.irrigado;
-  document.getElementById("tbFrota").innerHTML =
-    (ir.area_ha ? `<tr class="pivo"><td><b>💧 Área com pivô</b>
-        <small style="color:#7a8794">aplica o ano todo — contada só aqui, para não dobrar</small></td>
-      <td class="num">${fmt(ir.area_ha)} ha</td><td class="num">100%</td>
-      <td class="num">${fmt(ir.aplicacoes)}</td>
-      <td class="num"><b>${fmt(ir.ha_aplicados_ano)}</b></td></tr>` : "") +
-    (d.culturas.length
-      ? d.culturas.map(c => `<tr><td>🌿 ${esc(c.cultura)}</td>
-          <td class="num">${fmt(c.area_ha)} ha</td>
-          <td class="num">${fmt(c.fatia)}%</td>
-          <td class="num">${fmt(c.aplicacoes)}</td>
-          <td class="num"><b>${fmt(c.ha_aplicados_ano)}</b></td></tr>`).join("")
-      : `<tr><td colspan="5" style="color:#9aa6b2">Diga quantas aplicações cada cultura leva por ano, ao lado.</td></tr>`) +
-    `<tr style="background:#f4f8f5"><td colspan="4"><b>Total de hectares aplicados por ano em ${esc(onde)}</b></td>
-      <td class="num"><b style="color:#0f7b3f">${fmt(d.ha_aplicados_ano)}</b></td></tr>`;
+
+  const pv = d.pivo;
+  let linhas = "";
+  if (pv.area_ha){
+    linhas += `<tr class="tit"><td colspan="4">💧 Área com pivô — ${fmt(pv.area_ha)} ha, safra o ano todo</td>
+      <td class="num"></td></tr>`;
+    linhas += pv.itens.map(i => `<tr class="sub">
+      <td style="padding-left:26px">${esc(i.nome)} no pivô</td>
+      <td class="num">${fmt(pv.area_ha)} ha</td><td class="num">—</td>
+      <td class="num">${fmt(i.aplicacoes)}</td>
+      <td class="num">${fmt(i.ha_aplicados_ano)}</td></tr>`).join("");
+    linhas += `<tr><td style="padding-left:26px"><b>Pivô no ano (${fmt(pv.aplicacoes_ano)} aplicações)</b></td>
+      <td class="num">${fmt(pv.area_ha)} ha</td><td class="num"></td><td class="num"></td>
+      <td class="num"><b>${fmt(pv.ha_aplicados_ano)}</b></td></tr>`;
+  }
+  if (d.sequeiro.length){
+    linhas += `<tr class="tit"><td colspan="5">🌱 Sequeiro — cultura a cultura</td></tr>`;
+    linhas += d.sequeiro.map(s => `<tr>
+      <td style="padding-left:26px">${esc(s.nome)}
+        <small style="color:#9aa6b2;display:block">${s.fatia < 100
+          ? `${fmt(s.fatia)}% da área de ${esc(s.base)}` : `área de ${esc(s.base)}`}</small></td>
+      <td class="num">${fmt(s.area_considerada_ha)} ha</td>
+      <td class="num">${fmt(s.fatia)}%</td>
+      <td class="num">${fmt(s.aplicacoes)}</td>
+      <td class="num"><b>${fmt(s.ha_aplicados_ano)}</b></td></tr>`).join("");
+  }
+  if (!linhas) linhas = `<tr><td colspan="5" style="color:#9aa6b2">Monte a conta ao lado: safras no pivô e culturas do sequeiro.</td></tr>`;
+  linhas += `<tr style="background:#f4f8f5"><td colspan="4"><b>Total aplicado por ano em ${esc(onde)}</b></td>
+    <td class="num"><b style="color:#0f7b3f">${fmt(d.ha_aplicados_ano)}</b></td></tr>`;
+  document.getElementById("tbFrota").innerHTML = linhas;
   document.getElementById("frotaNota").innerHTML =
-    `A conta: <b>${fmt(d.ha_aplicados_ano)} ha aplicados por ano ÷ ${fmt(d.config.drone_ha_ano)} ha ` +
-    `que um drone dá conta = ${fmt(d.drones)} drones</b>. A área com pivô entra uma vez só, com as ` +
-    `aplicações do ano todo; nas culturas ela é descontada para não ser contada duas vezes.`;
+    `A conta: <b>${fmt(d.ha_aplicados_ano)} ha aplicados ÷ ${fmt(d.config.drone_ha_ano)} ha por drone ` +
+    `= ${fmt(d.drones)} drones por ano</b>. No sequeiro, a fatia irrigada de cada cultura já foi ` +
+    `descontada — ela conta nas safras do pivô, para a mesma terra não entrar duas vezes.`;
 }
 
-function desenharConfigFrota(d){
-  const c = d.config;
+function desenharConfigFrota(){
+  const c = frotaCfg;
   document.getElementById("fDroneHa").value = c.drone_ha_ano;
   document.getElementById("fDroneValor").value = c.drone_valor;
-  document.getElementById("fPivoApl").value = c.pivo_aplicacoes;
   document.getElementById("fManutModo").value = c.manutencao_modo;
   document.getElementById("fManutValor").value = c.manutencao_valor;
   unidadeManut();
-  document.getElementById("fCulturas").innerHTML =
-    `<div class="cab-cult"><span>Cultura</span><span>Apl.</span><span>% área</span></div>` +
-    frotaCults.map(x => {
-      const cf = c.culturas[String(x.id)] || {aplicacoes: 0, fatia: 100};
-      return `<div class="linha-cult">
-        <span><b>${esc(x.nome)}</b><small>${fmt(x.area_ha)} ha</small></span>
-        <input data-cult="${x.id}" data-c="aplicacoes" type="number" min="0" max="60" step="1" value="${cf.aplicacoes}">
-        <input data-cult="${x.id}" data-c="fatia" type="number" min="0" max="100" step="5" value="${cf.fatia}">
-      </div>`;
-    }).join("");
+  // safras no pivo
+  document.getElementById("fPivoSafras").innerHTML = c.pivo_safras.map((s, i) => `
+    <div class="linha-cult c2">
+      <input data-p="${i}" data-c="nome" maxlength="40" value="${esc(s.nome)}">
+      <input data-p="${i}" data-c="aplicacoes" type="number" min="0" max="60" step="1" value="${s.aplicacoes}">
+      <button class="tira" data-tirap="${i}" title="Tirar">×</button>
+    </div>`).join("") || `<small style="color:#9aa6b2">Nenhuma safra no pivô.</small>`;
+  // sequeiro
+  const ops = sel => frotaCults.map(x =>
+    `<option value="${x.id}" ${String(x.id) === String(sel) ? "selected" : ""}>${esc(x.nome)}</option>`).join("");
+  document.getElementById("fSequeiro").innerHTML = c.sequeiro.map((s, i) => `
+    <div class="linha-cult c4">
+      <input data-s="${i}" data-c="nome" maxlength="40" value="${esc(s.nome)}">
+      <select data-s="${i}" data-c="base_id">${ops(s.base_id)}</select>
+      <input data-s="${i}" data-c="fatia" type="number" min="0" max="100" step="5" value="${s.fatia}">
+      <input data-s="${i}" data-c="aplicacoes" type="number" min="0" max="60" step="1" value="${s.aplicacoes}">
+      <button class="tira" data-tiras="${i}" title="Tirar">×</button>
+    </div>`).join("") || `<small style="color:#9aa6b2">Nenhuma cultura no sequeiro.</small>`;
+  // ligacoes
+  document.querySelectorAll("#fPivoSafras [data-c]").forEach(el => el.onchange = () => {
+    const r = frotaCfg.pivo_safras[+el.dataset.p];
+    r[el.dataset.c] = el.dataset.c === "nome" ? el.value : Number(el.value);
+  });
+  document.querySelectorAll("#fSequeiro [data-c]").forEach(el => el.onchange = () => {
+    const r = frotaCfg.sequeiro[+el.dataset.s];
+    r[el.dataset.c] = el.dataset.c === "nome" ? el.value : Number(el.value);
+  });
+  document.querySelectorAll("[data-tirap]").forEach(el => el.onclick = () => {
+    frotaCfg.pivo_safras.splice(+el.dataset.tirap, 1); desenharConfigFrota();
+  });
+  document.querySelectorAll("[data-tiras]").forEach(el => el.onclick = () => {
+    frotaCfg.sequeiro.splice(+el.dataset.tiras, 1); desenharConfigFrota();
+  });
 }
+
+document.getElementById("btAddPivo").onclick = () => {
+  frotaCfg.pivo_safras.push({nome: "", aplicacoes: 10});
+  desenharConfigFrota();
+};
+document.getElementById("btAddSeq").onclick = () => {
+  const c = frotaCults[0] || {id: 1};
+  frotaCfg.sequeiro.push({nome: "", base_id: c.id, fatia: 100, aplicacoes: 5});
+  desenharConfigFrota();
+};
 
 function unidadeManut(){
   const m = document.getElementById("fManutModo").value;
@@ -816,19 +877,14 @@ document.getElementById("fManutModo").onchange = unidadeManut;
 
 document.getElementById("btSalvarFrota").onclick = async () => {
   const msg = document.getElementById("frotaMsg");
-  const culturas = {};
-  document.querySelectorAll("#fCulturas [data-cult]").forEach(el => {
-    const id = el.dataset.cult;
-    culturas[id] = culturas[id] || {aplicacoes: 0, fatia: 100};
-    culturas[id][el.dataset.c] = Number(el.value);
-  });
+  const pivo_safras = frotaCfg.pivo_safras.filter(s => s.nome.trim() && s.aplicacoes > 0);
+  const sequeiro = frotaCfg.sequeiro.filter(s => s.nome.trim() && s.aplicacoes > 0);
   const corpo = {
     drone_ha_ano: Number(document.getElementById("fDroneHa").value),
     drone_valor: Number(document.getElementById("fDroneValor").value),
-    pivo_aplicacoes: Number(document.getElementById("fPivoApl").value),
     manutencao_modo: document.getElementById("fManutModo").value,
     manutencao_valor: Number(document.getElementById("fManutValor").value),
-    culturas
+    pivo_safras, sequeiro
   };
   const d = await api("/api/frota", {method: "POST",
     headers: {"Content-Type": "application/json"}, body: JSON.stringify(corpo)});
@@ -838,7 +894,7 @@ document.getElementById("btSalvarFrota").onclick = async () => {
   carregarFrota();
 };
 
-/* 🔥 Mapa de calor: pinta cada CIDADE conforme a área irrigada por pivô que
+/* 🔥 Mapa de calor: pinta cada CIDADE conforme a área irrigada por pivô que/* 🔥 Mapa de calor: pinta cada CIDADE conforme a área irrigada por pivô que
    ela tem. A escala é relativa ao maior município do recorte. */
 const CORES_CALOR = ["#fff5eb","#fee0b6","#fdae61","#f46d43","#d73027","#8c0f1d"];
 function corCalor(f){                       // f = 0..1, escala de raiz para o
