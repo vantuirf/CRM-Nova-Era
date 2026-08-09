@@ -3896,6 +3896,20 @@ class Handler(BaseHTTPRequestHandler):
                     return self.send_json(200, {"limites": [], "sem_limites": True})
                 mun = (qs.get("municipio_id") or [""])[0]
                 ter = (qs.get("territorio_id") or [""])[0]
+                if (qs.get("todos") or [""])[0] == "1":
+                    # modo de montagem de territorio: TODAS as cidades precisam
+                    # ser clicaveis no mapa, nao so as que aparecem no calor
+                    rows = con.execute(
+                        "SELECT m.id, m.nome, c.geojson FROM municipio_contorno c "
+                        "JOIN municipios m ON m.id = c.municipio_id").fetchall()
+                    saida = []
+                    for r in rows:
+                        try:
+                            saida.append({"id": r["id"], "nome": r["nome"],
+                                          "aneis": json.loads(r["geojson"])})
+                        except Exception:
+                            continue
+                    return self.send_json(200, {"limites": saida})
                 if ter.isdigit():
                     rows = con.execute(
                         "SELECT m.nome, c.geojson FROM municipio_contorno c "

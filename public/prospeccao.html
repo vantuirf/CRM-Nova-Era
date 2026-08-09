@@ -515,7 +515,28 @@ async function excluirTer(id){
    na lista da esquerda ou direto no mapa. Clicou de novo, tira. O cartão
    flutuante mostra o que já entrou e salva. */
 let montando = false, montId = null, montSel = new Set(), camadaMont = null;
+let fundoMont = null, fundoMontCache = null;
 const contornoMunCache = {};
+
+/* na montagem, TODA cidade vira área clicável no mapa — sem isso só dava para
+   clicar nas que têm pivô (os polígonos do calor) */
+async function ligarFundoMont(){
+  if (!fundoMontCache){
+    const d = await api("/atlas-api/limite?todos=1");
+    fundoMontCache = d.limites || [];
+    fundoMontCache.forEach(m => { contornoMunCache[m.id] = m.aneis; });
+  }
+  fundoMont = L.layerGroup();
+  fundoMontCache.forEach(m => {
+    if (!m.aneis || !m.aneis.length) return;
+    fundoMont.addLayer(L.polygon(m.aneis.map(a => a.map(([x, y]) => [y, x])), {
+      color: "#ffffff", weight: 1, opacity: .65, dashArray: "3 3",
+      fillColor: "#ffffff", fillOpacity: .04
+    }).bindTooltip(m.nome, {sticky: true})
+      .on("click", () => { if (montando) toggleMont(m.id); }));
+  });
+  if (montando) fundoMont.addTo(mapa);
+}
 
 document.addEventListener("click", e => {
   if (e.target.id === "btnNovoTer") iniciarMontagem();
@@ -526,6 +547,7 @@ function iniciarMontagem(ter){
   montId = ter ? ter.id : null;
   montSel = new Set(ter ? ter.municipio_ids : []);
   if (!camadaMont){ camadaMont = L.layerGroup(); }
+  ligarFundoMont();
   camadaMont.addTo(mapa);
   document.getElementById("cartaoMont").hidden = false;
   document.getElementById("mtNome").value = ter ? ter.nome : "";
@@ -538,6 +560,7 @@ function iniciarMontagem(ter){
 function sairMontagem(){
   montando = false; montId = null; montSel.clear();
   if (camadaMont){ camadaMont.clearLayers(); camadaMont.remove(); }
+  if (fundoMont){ fundoMont.remove(); fundoMont = null; }
   document.getElementById("cartaoMont").hidden = true;
   document.body.classList.remove("montando");
   document.querySelectorAll("#listaMun .mun.mont").forEach(x => x.classList.remove("mont"));
