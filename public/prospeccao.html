@@ -228,7 +228,7 @@
           <thead><tr><th>Proprietário</th><th class="num">Fazendas</th><th class="num">Área total (ha)</th>
             <th class="num" id="thCultPes" hidden>Cultura (ha)</th>
             <th class="num" title="Pessoas ligadas à mesma fazenda">Sócios</th>
-            <th class="num" id="thPotPes" hidden>Potencial</th>
+            <th class="num" id="thPotPes" hidden title="Somando TODAS as fazendas do produtor — por isso pode existir aqui e não entrar no &quot;imediato&quot; do painel, que conta fazenda por fazenda">Potencial do produtor</th>
             <th>Onde está</th></tr></thead>
           <tbody id="tbPes"></tbody>
         </table>
@@ -1057,10 +1057,11 @@ async function carregarPessoas(){
         <td class="num"><b>${fmt(p.area_ha)}</b></td>
         ${temCult ? `<td class="num">${fmt(p.area_cultura_ha || 0)}</td>` : ""}
         <td class="num">${(p.socios_max || 1) > 1
-            ? `<span class="socios" title="A maior fazenda dele tem ${fmt(p.socios_max)} pessoas ligadas — a área não é toda dele">👥 ${fmt(p.socios_max)}</span>`
+            ? `<span class="socios" title="Em pelo menos uma das fazendas dele há ${fmt(p.socios_max)} pessoas ligadas — parte da área somada é compartilhada">👥 ${fmt(p.socios_max)}</span>`
             : `<small style="color:#9aa6b2">único</small>`}</td>
         ${potTemRegras ? `<td class="num" title="${esc((p.potencial_itens||[]).map(i => i.unidades + "x " + i.produto).join(", "))}">
-            ${p.potencial_rs ? "<b style='color:#0f7b3f'>" + dinheiro(p.potencial_rs) + "</b>" : "–"}</td>` : ""}
+            ${p.potencial_rs > 0 ? "<b style='color:#0f7b3f'>" + dinheiro(p.potencial_rs) + "</b>"
+              : "<small style='color:#9aa6b2'>sem lavoura p/ a regra</small>"}</td>` : ""}
         <td><small style="color:#7a8794">${esc((p.municipios||"").split(",").slice(0,3).join(", "))}</small></td>
       </tr>`).join("")
     : `<tr><td colspan="${colspan}" style="color:#9aa6b2">${
@@ -1097,7 +1098,7 @@ async function carregarPotencial(){
   res.innerHTML =
     `<div class="pot-dois">
        <div><b>${dinheiro(d.total_rs)}</b>
-         <span>potencial <u>imediato</u> — só de quem, sozinho, já tem lavoura para o produto</span></div>
+         <span>potencial <u>imediato</u> — contando fazenda por fazenda (na lista de Proprietários a conta soma as fazendas de cada dono, então lá o número é maior)</span></div>
        <div><b style="color:#1e63a8">${dinheiro(d.total_regiao_rs)}</b>
          <span>mercado <u>da região</u> — toda a lavoura do recorte dividida pela regra</span></div>
      </div>`;

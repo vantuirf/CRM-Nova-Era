@@ -85,6 +85,11 @@ ATLAS_TABELAS_EQUIPE = ("pessoas", "fazenda_pessoas", "registros",
 
 
 def _atlas_versao_do(caminho):
+    # sqlite3.connect CRIA o arquivo se ele nao existir: um atlas.db de 0 byte
+    # ficava para tras e, no boot seguinte, a rota achava que o Atlas estava
+    # instalado e respondia 500 em vez do 503 "Atlas nao instalado"
+    if not os.path.exists(caminho) or os.path.getsize(caminho) == 0:
+        return None
     try:
         con = sqlite3.connect(caminho)
         r = con.execute("SELECT v FROM atlas_meta LIMIT 1").fetchone()
@@ -156,14 +161,31 @@ def _atlas_migra_edicoes(antigo, novo):
         cols = [c for c in cols_n if c in cols_v and c != "id"]
         lista = ", ".join(cols)
         prox = (con.execute("SELECT COALESCE(MAX(id),0) FROM pessoas").fetchone()[0] or 0) + 1
-        pes = {}
+        # Sem indice, casar 22 mil pessoas por UPPER(nome) faz uma varredura
+        # completa por pessoa e a troca da base leva ~60 s de CRM parado.
+        con.execute("CREATE INDEX IF NOT EXISTS idx_pes_nome_up ON pessoas(UPPER(nome))")
+        con.execute("CREATE INDEX IF NOT EXISTS idx_pes_doc ON pessoas(documento)")
+        pes, homonimos = {}, 0
         for linha in con.execute("SELECT id, %s FROM velho.pessoas" % lista).fetchall():
             vid, dados = linha[0], linha[1:]
-            achou = con.execute(
-                "SELECT id FROM pessoas WHERE (documento IS NOT NULL AND documento <> '' "
-                "AND documento = ?) OR UPPER(nome) = UPPER(?)",
-                [dados[cols.index("documento")] if "documento" in cols else None,
-                 dados[cols.index("nome")] if "nome" in cols else ""]).fetchone()
+            doc_v = dados[cols.index("documento")] if "documento" in cols else None
+            nome_v = dados[cols.index("nome")] if "nome" in cols else ""
+            # O documento manda. O nome so vale quando NENHUM dos dois lados tem
+            # documento (ou tem o mesmo): dois JOSE CARLOS DA SILVA com CPF
+            # diferente sao duas pessoas, e fundi-los jogava fora o CPF e o
+            # telefone de um deles e pendurava a fazenda no produtor errado.
+            achou = None
+            if doc_v not in (None, ""):
+                achou = con.execute("SELECT id FROM pessoas WHERE documento = ?",
+                                    [doc_v]).fetchone()
+            if achou is None:
+                achou = con.execute(
+                    "SELECT id FROM pessoas WHERE UPPER(nome) = UPPER(?) "
+                    "AND (documento IS NULL OR documento = '' "
+                    "     OR ? IS NULL OR ? = '' OR documento = ?)",
+                    [nome_v, doc_v, doc_v, doc_v]).fetchone()
+                if achou is None and doc_v not in (None, ""):
+                    homonimos += 1
             if achou:
                 pes[vid] = achou[0]
                 # completa o que faltava (telefone/e-mail que a equipe cadastrou)
@@ -177,7 +199,7 @@ def _atlas_migra_edicoes(antigo, novo):
                 pes[vid] = prox
                 prox += 1
     else:
-        pes = {}
+        pes, homonimos = {}, 0
 
     # --- vinculos fazenda<->pessoa (religados pelo CAR)
     if "fazenda_pessoas" in tabs_velho:
@@ -231,7 +253,11 @@ def _atlas_migra_edicoes(antigo, novo):
     con.execute("DETACH velho")
     con.close()
     if perdidas:
-        print("[atlas] AVISO: %d vínculo(s)/registro(s) não encontraram destino na base nova" % perdidas)
+        print("[atlas] AVISO: %d vínculo(s)/registro(s) não encontraram destino na base nova" % perdidas,
+              flush=True)
+    if homonimos:
+        print("[atlas] %d pessoa(s) de mesmo nome e documento diferente mantidas separadas"
+              % homonimos, flush=True)
 
 
 def atlas_boot():
@@ -259,9 +285,9 @@ def atlas_boot():
                         shutil.copy2(ATLAS_DB, ATLAS_DB + ".anterior")
                 except OSError:
                     pass
-                print("[atlas] base atualizada (edições da equipe preservadas)")
+                print("[atlas] base atualizada (edições da equipe preservadas)", flush=True)
             else:
-                print("[atlas] banco instalado em %s" % ATLAS_DB)
+                print("[atlas] banco instalado em %s" % ATLAS_DB, flush=True)
             os.replace(tmp, ATLAS_DB)
             for sufixo in ("-wal", "-shm"):   # sobras do banco antigo
                 try:
@@ -310,7 +336,7 @@ def atlas_boot():
                 ALTER TABLE pessoas_pk RENAME TO pessoas;
                 COMMIT;
             """)
-            print("[atlas] tabela pessoas migrada para chave primaria de verdade")
+            print("[atlas] tabela pessoas migrada para chave primaria de verdade", flush=True)
         _pivos_boot(con)
         con.commit()
         con.close()
@@ -319,7 +345,9 @@ def atlas_boot():
 def _pivos_boot(con):
     """Instala/atualiza os pivos centrais no atlas.db a partir do pivos.json.gz.
     A fonte da verdade e o arquivo do repositorio, entao a troca da base do
-    Atlas nao precisa preservar nada: se o arquivo mudar, a tabela e refeita."""
+    Atlas nao precisa preservar nada: se o arquivo mudar, a tabela e refeita.
+    Le e valida TUDO antes de encostar na tabela boa — um arquivo truncado nao
+    pode deixar o CRM anunciando "0 pivos" como se fosse a verdade da regiao."""
     if not os.path.exists(PIVOS_GZ):
         return
     try:
@@ -332,38 +360,61 @@ def _pivos_boot(con):
         atual = con.execute("SELECT v FROM pivos_meta LIMIT 1").fetchone()
         tem_tab = con.execute("SELECT 1 FROM sqlite_master WHERE type='table' "
                               "AND name='pivos'").fetchone()
-        if atual and atual[0] == versao and tem_tab:
+        instalados = (con.execute("SELECT COUNT(*) FROM pivos").fetchone()[0]
+                      if tem_tab else 0)
+        if atual and atual[0] == versao and instalados:
             return
         with gzip.open(PIVOS_GZ, "rt", encoding="utf-8") as g:
             dados = json.load(g)
-        con.execute("DROP TABLE IF EXISTS pivos")
-        con.execute("CREATE TABLE pivos (id INTEGER PRIMARY KEY, lat REAL, lng REAL, "
-                    "ha REAL, ano TEXT, desde TEXT, ibge TEXT, municipio_id INT)")
         # de codigo do IBGE para o municipio do Atlas (a chave que os dois lados tem)
         mapa = {str(r[1]): r[0] for r in
                 con.execute("SELECT id, codigo_ibge FROM municipios").fetchall() if r[1]}
-        linhas = [(round(float(p[1]), 6), round(float(p[0]), 6), float(p[2] or 0),
-                   str(p[4] or ""), str(p[5] if len(p) > 5 else p[4] or ""),
-                   str(p[3] or ""), mapa.get(str(p[3] or "")))
-                  for p in dados.get("pivos", [])
-                  if p and p[0] is not None and p[1] is not None]
-        con.executemany("INSERT INTO pivos (lat, lng, ha, ano, desde, ibge, municipio_id) "
-                        "VALUES (?,?,?,?,?,?,?)", linhas)
-        con.execute("CREATE INDEX IF NOT EXISTS idx_piv_latlng ON pivos(lat, lng)")
-        con.execute("CREATE INDEX IF NOT EXISTS idx_piv_mun ON pivos(municipio_id)")
-        con.execute("DELETE FROM pivos_meta")
-        con.execute("INSERT INTO pivos_meta (v) VALUES (?)", [versao])
-        con.execute("CREATE TABLE IF NOT EXISTS pivos_info (chave TEXT, valor TEXT)")
-        con.execute("DELETE FROM pivos_info")
-        con.execute("INSERT INTO pivos_info (chave, valor) VALUES ('ultimo_levantamento', ?)",
-                    [str(dados.get("ultimo_levantamento") or "")])
-        con.commit()
-        sem_mun = sum(1 for l in linhas if l[5] is None)
-        print("[atlas] %d pivos centrais instalados (%d sem municipio)"
-              % (len(linhas), sem_mun))
+        linhas, descartadas = [], 0
+        for p in dados.get("pivos", []):
+            try:
+                if not p or len(p) < 5 or p[0] is None or p[1] is None:
+                    raise ValueError("linha incompleta")
+                lat, lng, ha = float(p[1]), float(p[0]), float(p[2] or 0)
+                if not (math.isfinite(lat) and math.isfinite(lng) and math.isfinite(ha)):
+                    raise ValueError("coordenada invalida")
+                if not (-90 <= lat <= 90 and -180 <= lng <= 180) or ha <= 0:
+                    raise ValueError("fora do mundo")
+                ibge = str(p[3] or "")
+                linhas.append((round(lat, 6), round(lng, 6), ha, str(p[4] or ""),
+                               str(p[5] if len(p) > 5 else p[4] or ""), ibge, mapa.get(ibge)))
+            except (TypeError, ValueError, IndexError):
+                descartadas += 1
+        # arquivo vazio ou muito menor que o instalado nao substitui o bom
+        if not linhas or (instalados and len(linhas) < instalados * 0.5):
+            print("[atlas] pivos NAO trocados: arquivo traria %d de %d (%d linhas descartadas)"
+                  % (len(linhas), instalados, descartadas), flush=True)
+            return
+        con.execute("BEGIN IMMEDIATE")       # sem autocommit no meio da troca
+        try:
+            con.execute("DROP TABLE IF EXISTS pivos")
+            con.execute("CREATE TABLE pivos (id INTEGER PRIMARY KEY, lat REAL, lng REAL, "
+                        "ha REAL, ano TEXT, desde TEXT, ibge TEXT, municipio_id INT)")
+            con.executemany("INSERT INTO pivos (lat, lng, ha, ano, desde, ibge, municipio_id) "
+                            "VALUES (?,?,?,?,?,?,?)", linhas)
+            con.execute("CREATE INDEX IF NOT EXISTS idx_piv_latlng ON pivos(lat, lng)")
+            con.execute("CREATE INDEX IF NOT EXISTS idx_piv_mun ON pivos(municipio_id)")
+            con.execute("DELETE FROM pivos_meta")
+            con.execute("INSERT INTO pivos_meta (v) VALUES (?)", [versao])
+            con.execute("CREATE TABLE IF NOT EXISTS pivos_info (chave TEXT, valor TEXT)")
+            con.execute("DELETE FROM pivos_info")
+            con.execute("INSERT INTO pivos_info (chave, valor) VALUES ('ultimo_levantamento', ?)",
+                        [str(dados.get("ultimo_levantamento") or "")])
+            con.commit()
+        except Exception:
+            con.rollback()
+            raise
+        sem_mun = con.execute("SELECT COUNT(*) FROM pivos "
+                              "WHERE municipio_id IS NULL").fetchone()[0]
+        print("[atlas] %d pivos centrais instalados (%d sem municipio, %d descartados)"
+              % (len(linhas), sem_mun, descartadas), flush=True)
     except Exception as e:
         # sem pivos o CRM continua funcionando; melhor que derrubar o servidor
-        print("[atlas] nao foi possivel instalar os pivos:", e)
+        print("[atlas] nao foi possivel instalar os pivos:", e, flush=True)
 
 
 def _sem_acento(txt):
@@ -1105,7 +1156,9 @@ def save_db():
         os.makedirs(DATA_DIR, exist_ok=True)
         tmp = DB_FILE + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(_db, f, ensure_ascii=False, indent=2)
+            # allow_nan=False: NaN/Infinity nao sao JSON valido e ja passaram
+            # por aqui uma vez, deixando o painel em erro 500 ate edicao na mao
+            json.dump(_db, f, ensure_ascii=False, indent=2, allow_nan=False)
         os.replace(tmp, DB_FILE)
     except Exception as e:
         print("Falha ao salvar o banco:", e)
@@ -1869,6 +1922,7 @@ def user_publico(u):
 
 
 POTENCIAL_PADRAO = []
+MAX_REGRAS_ATIVAS = 12
 
 
 def potencial_regras():
@@ -1887,6 +1941,11 @@ def potencial_regras():
         except (TypeError, ValueError):
             continue
         cid = r.get("cultura_id")
+        # NaN/Infinity escapam de qualquer comparacao (NaN <= 0 e falso) e
+        # explodem depois no int(area // ha): descarta aqui tambem, para um
+        # banco ja contaminado voltar a abrir sozinho
+        if not math.isfinite(ha) or not math.isfinite(valor):
+            continue
         if ha <= 0 or not str(cid).isdigit():
             continue
         limpas.append({"id": str(r.get("id") or "")[:40],
@@ -3039,7 +3098,7 @@ class Handler(BaseHTTPRequestHandler):
                          "form-action 'self'" % (midia, midia))
 
     def send_json(self, status, obj, headers=None):
-        body = json.dumps(obj, ensure_ascii=False).encode("utf-8")
+        body = json.dumps(obj, ensure_ascii=False, allow_nan=False).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
@@ -3086,12 +3145,16 @@ class Handler(BaseHTTPRequestHandler):
             cond.append(prefixo + "municipio_id = ?")
             params.append(int(mun))
         amin = (qs.get("area_min") or [""])[0]
-        try:
-            if amin:
+        if amin:
+            # converter ANTES de tocar em cond: o append do "?" ja tinha entrado
+            # e o float estourando deixava a consulta com placeholder sobrando
+            try:
+                v_amin = float(amin)
+            except ValueError:
+                v_amin = None
+            if v_amin is not None and math.isfinite(v_amin):
                 cond.append(prefixo + "area_total_ha >= ?")
-                params.append(float(amin))
-        except ValueError:
-            pass
+                params.append(v_amin)
         cult = (qs.get("cultura") or [""])[0]
         if cult.isdigit():
             try:
@@ -3102,7 +3165,11 @@ class Handler(BaseHTTPRequestHandler):
                         "WHERE fc.cultura_id = ? AND fc.area_ha >= ? "
                         "AND fc.safra = (SELECT MAX(safra) FROM fazenda_culturas))")
             params += [int(cult), cmin]
-        return " AND ".join(cond), params
+        w = " AND ".join(cond)
+        if w.count("?") != len(params):   # ja aconteceu; melhor gritar em teste
+            print("[atlas] ALERTA: escopo com %d placeholders e %d parametros"
+                  % (w.count("?"), len(params)), flush=True)
+        return w, params
 
     def _multipart_arquivo(self):
         """Extrai (nome, bytes) do primeiro arquivo de um POST multipart."""
@@ -3127,7 +3194,7 @@ class Handler(BaseHTTPRequestHandler):
         """API do Atlas de prospeccao (242 mil fazendas de Goias), servida do
         data/atlas.db. Portada do atlas-agro/app.py — mesmas rotas e formatos.
         Sem a tabela de contornos (versao compacta), o mapa cai para pontos."""
-        if not os.path.exists(ATLAS_DB):
+        if not os.path.exists(ATLAS_DB) or os.path.getsize(ATLAS_DB) == 0:
             return self.send_json(503, {"erro": "O Atlas ainda não está instalado neste servidor"})
         # Prospeccao e trabalho de venda: SDR nao acessa (a API guarda CPF/
         # telefone de produtores — mesmo modelo de acesso dos leads)
@@ -3196,7 +3263,9 @@ class Handler(BaseHTTPRequestHandler):
                 if cult.isdigit():
                     sel += ", ROUND(SUM(" + col_cult + ")) AS area_cultura_ha"
                     psel.append(int(cult))
-                regras = [r for r in potencial_regras() if r["ativa"]][:6]
+                # sem corte: a lista tem de contar os MESMOS produtos do painel
+                # (o teto agora e cobrado na hora de salvar, onde o gestor ve)
+                regras = [r for r in potencial_regras() if r["ativa"]]
                 for i, r in enumerate(regras):
                     sel += ", SUM(" + col_cult + ") AS pot%d" % i
                     psel.append(r["cultura_id"])
@@ -3286,6 +3355,7 @@ class Handler(BaseHTTPRequestHandler):
                     "resumo": resumo,
                     "cidades": [dict(c) for c in cidades],
                     "cobertura": cobertura,
+                    "regras_aplicadas": len(regras),
                     "busca": busca})
 
             mpes = re.match(r"^/atlas-api/pessoa/(\d+)$", path)
@@ -3365,9 +3435,13 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/atlas-api/pivos" and method == "GET":
                 # Pivos centrais do recorte. No mapa cada um vira um circulo,
                 # entao devolvemos centro + raio calculado da area.
-                if "pivos" not in tabs:
+                # "0 pivos" so pode significar "este recorte nao tem"; base
+                # ausente ou vazia e "nao sei", e a tela mostra "–"
+                if ("pivos" not in tabs or
+                        not con.execute("SELECT 1 FROM pivos LIMIT 1").fetchone()):
                     return self.send_json(200, {"pivos": [], "sem_pivos": True,
-                                                "total": 0, "area_ha": 0})
+                                                "total": 0, "area_ha": 0,
+                                                "mostrando": 0, "atuais": 0})
                 cond, params = ["1=1"], []
                 mun = (qs.get("municipio_id") or [""])[0]
                 ter = (qs.get("territorio_id") or [""])[0]
@@ -4293,6 +4367,12 @@ class Handler(BaseHTTPRequestHandler):
             entradas = body.get("regras")
             if not isinstance(entradas, list) or len(entradas) > 40:
                 return self.send_json(400, {"error": "Envie até 40 regras"})
+            # cada regra ativa custa uma subconsulta por produtor na listagem:
+            # o limite existe, e tem de ser dito na cara do gestor
+            if sum(1 for r in entradas
+                   if isinstance(r, dict) and r.get("ativa") is not False) > MAX_REGRAS_ATIVAS:
+                return self.send_json(400, {"error":
+                    "No máximo %d regras ativas ao mesmo tempo" % MAX_REGRAS_ATIVAS})
             limpas = []
             for r in entradas:
                 if not isinstance(r, dict):
@@ -4301,6 +4381,8 @@ class Handler(BaseHTTPRequestHandler):
                     ha = float(r.get("ha_por_unidade") or 0)
                     valor = float(r.get("valor_unidade") or 0)
                 except (TypeError, ValueError):
+                    return self.send_json(400, {"error": "Área e valor precisam ser números"})
+                if not (math.isfinite(ha) and math.isfinite(valor)):
                     return self.send_json(400, {"error": "Área e valor precisam ser números"})
                 cid = str(r.get("cultura_id") or "")
                 if not cid.isdigit() or ha <= 0:
