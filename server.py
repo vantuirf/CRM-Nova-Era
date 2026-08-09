@@ -1928,6 +1928,44 @@ def user_publico(u):
 POTENCIAL_PADRAO = []
 MAX_REGRAS_ATIVAS = 12
 
+# Frota: quantos drones a regiao comporta em um ano, pelo tanto de hectare
+# APLICADO (area x aplicacoes), e nao pelo tanto de area plantada.
+FROTA_PADRAO = {
+    "drone_valor": 180000.0,      # R$ por drone
+    "drone_ha_ano": 4000.0,       # hectares que um drone aplica por ano
+    "pivo_aplicacoes": 12.0,      # area irrigada aplica o ano todo
+    "manutencao_modo": "percentual",   # percentual | por_ha | fixo
+    "manutencao_valor": 12.0,
+    "culturas": {},               # {cultura_id: {"aplicacoes": n, "fatia": %}}
+}
+
+
+def frota_config():
+    """Configuracao da conta de frota, com os padroes preenchidos."""
+    c = dict(FROTA_PADRAO)
+    c["culturas"] = {}
+    salvo = _db.get("settings", {}).get("frota")
+    if isinstance(salvo, dict):
+        for k in ("drone_valor", "drone_ha_ano", "pivo_aplicacoes", "manutencao_valor"):
+            v = _num_pos(salvo.get(k), 1e12)
+            if v > 0 or k == "manutencao_valor":
+                c[k] = v
+        modo = str(salvo.get("manutencao_modo") or "")
+        if modo in ("percentual", "por_ha", "fixo"):
+            c["manutencao_modo"] = modo
+        cults = salvo.get("culturas")
+        if isinstance(cults, dict):
+            for cid, v in cults.items():
+                if not str(cid).isdigit() or not isinstance(v, dict):
+                    continue
+                c["culturas"][str(cid)] = {
+                    "aplicacoes": _num_pos(v.get("aplicacoes"), 60),
+                    "fatia": min(_num_pos(v.get("fatia"), 100) or 100, 100),
+                }
+    if c["drone_ha_ano"] <= 0:
+        c["drone_ha_ano"] = FROTA_PADRAO["drone_ha_ano"]
+    return c
+
 
 def potencial_regras():
     """Regras de potencial comercial: 'a cada X ha da cultura Y vendo 1 Z de R$ W'.
@@ -3505,6 +3543,80 @@ class Handler(BaseHTTPRequestHandler):
                     "ultimo_levantamento": ultimo,
                     "fonte": "ANA — Levantamento da Agricultura Irrigada por Pivôs Centrais"})
 
+            if path == "/atlas-api/frota" and method == "GET":
+                # Quantos drones a regiao comporta em um ano. A conta e por
+                # HECTARE APLICADO (area x aplicacoes no ano), nao por area
+                # plantada: e o uso que gasta o drone e vende a proxima peca.
+                cfg = frota_config()
+                w, p = self._atlas_escopo(qs)
+                safra = " AND fc.safra = (SELECT MAX(safra) FROM fazenda_culturas) AND "
+                # area irrigada do recorte: ela aplica o ano todo e NAO pode ser
+                # contada de novo dentro da cultura (o pivo esta plantado com algo)
+                irr = 0.0
+                if "pivos" in tabs:
+                    cond_p, pp = ["1=1"], []
+                    ter = (qs.get("territorio_id") or [""])[0]
+                    mun = (qs.get("municipio_id") or [""])[0]
+                    if ter.isdigit():
+                        cond_p.append("municipio_id IN (SELECT municipio_id FROM "
+                                      "territorio_municipios WHERE territorio_id = ?)")
+                        pp.append(int(ter))
+                    elif mun.isdigit():
+                        cond_p.append("municipio_id = ?")
+                        pp.append(int(mun))
+                    r = con.execute("SELECT COALESCE(SUM(ha),0) AS ha FROM pivos WHERE "
+                                    + " AND ".join(cond_p), pp).fetchone()
+                    irr = float(r["ha"] or 0)
+                # area de cada cultura no recorte
+                areas = {}
+                for r in con.execute(
+                        "SELECT c.id, c.nome, COALESCE(SUM(fc.area_ha),0) AS ha "
+                        "FROM fazenda_culturas fc JOIN culturas c ON c.id = fc.cultura_id "
+                        "JOIN fazendas f ON f.id = fc.fazenda_id "
+                        "WHERE 1=1" + safra + w + " GROUP BY c.id", p).fetchall():
+                    areas[str(r["id"])] = {"nome": r["nome"], "ha": float(r["ha"] or 0)}
+                # a area irrigada sai proporcionalmente das culturas, para nao contar duas vezes
+                total_lavoura = sum(a["ha"] for a in areas.values()) or 1.0
+                itens, ha_ano = [], 0.0
+                for cid, conf in cfg["culturas"].items():
+                    a_ = areas.get(cid)
+                    if not a_ or conf["aplicacoes"] <= 0:
+                        continue
+                    area_c = a_["ha"] * (conf["fatia"] / 100.0)
+                    fatia_irr = min(irr * (a_["ha"] / total_lavoura), area_c)
+                    sequeiro = max(area_c - fatia_irr, 0.0)
+                    ha_seq = sequeiro * conf["aplicacoes"]
+                    ha_ano += ha_seq
+                    itens.append({"cultura_id": int(cid), "cultura": a_["nome"],
+                                  "area_ha": round(a_["ha"]),
+                                  "fatia": conf["fatia"], "aplicacoes": conf["aplicacoes"],
+                                  "area_considerada_ha": round(sequeiro),
+                                  "ha_aplicados_ano": round(ha_seq)})
+                ha_pivo = irr * cfg["pivo_aplicacoes"]
+                ha_ano += ha_pivo
+                drones = math.ceil(ha_ano / cfg["drone_ha_ano"]) if ha_ano > 0 else 0
+                valor_drones = drones * cfg["drone_valor"]
+                modo = cfg["manutencao_modo"]
+                if modo == "percentual":
+                    manut = valor_drones * (cfg["manutencao_valor"] / 100.0)
+                elif modo == "por_ha":
+                    manut = ha_ano * cfg["manutencao_valor"]
+                else:
+                    manut = drones * cfg["manutencao_valor"]
+                return self.send_json(200, {
+                    "config": cfg,
+                    "culturas": sorted(itens, key=lambda x: -x["ha_aplicados_ano"]),
+                    "irrigado": {"area_ha": round(irr), "aplicacoes": cfg["pivo_aplicacoes"],
+                                 "ha_aplicados_ano": round(ha_pivo)},
+                    "ha_aplicados_ano": round(ha_ano),
+                    "drones": drones,
+                    "valor_drones": round(valor_drones, 2),
+                    "manutencao_ano": round(manut, 2),
+                    "total_ano": round(valor_drones + manut, 2),
+                    "lista_culturas": [{"id": int(k), "nome": v["nome"], "area_ha": round(v["ha"])}
+                                       for k, v in sorted(areas.items(),
+                                                          key=lambda kv: -kv[1]["ha"])]})
+
             if path == "/atlas-api/calor" and method == "GET":
                 # Mapa de calor por cidade: quanto de area irrigada por pivo cada
                 # municipio tem. Devolve o contorno junto para pintar o poligono
@@ -4466,6 +4578,58 @@ class Handler(BaseHTTPRequestHandler):
                 _db.setdefault("settings", {})["potencial_regras"] = limpas
                 save_db()
             return self.send_json(200, {"regras": potencial_regras()})
+
+        # ---- Conta de frota: aplicacoes por ano, capacidade do drone, manutencao ----
+        if path == "/api/frota" and method == "GET":
+            return self.send_json(200, {"frota": frota_config()})
+
+        if path == "/api/frota" and method == "POST":
+            if not gestor:
+                return self.send_json(403, {"error": "Só gerente/administrador define a conta de frota"})
+            try:
+                body = self.read_body()
+            except Exception:
+                return self.send_json(400, {"error": "Corpo invalido"})
+            cfg = {}
+            for k, teto in (("drone_valor", 1e12), ("drone_ha_ano", 1e7),
+                            ("pivo_aplicacoes", 60), ("manutencao_valor", 1e12)):
+                if k in body:
+                    try:
+                        v = float(body.get(k) or 0)
+                    except (TypeError, ValueError):
+                        return self.send_json(400, {"error": "Os valores precisam ser números"})
+                    if not math.isfinite(v) or v < 0 or v > teto:
+                        return self.send_json(400, {"error": "Valor fora do razoável em " + k})
+                    cfg[k] = v
+            if cfg.get("drone_ha_ano", 1) <= 0:
+                return self.send_json(400, {"error": "Diga quantos hectares um drone aplica por ano"})
+            modo = str(body.get("manutencao_modo") or "percentual")
+            if modo not in ("percentual", "por_ha", "fixo"):
+                return self.send_json(400, {"error": "Forma de calcular a manutenção inválida"})
+            cfg["manutencao_modo"] = modo
+            cults = body.get("culturas")
+            limpo = {}
+            if isinstance(cults, dict):
+                if len(cults) > 30:
+                    return self.send_json(400, {"error": "Culturas demais"})
+                for cid, v in cults.items():
+                    if not str(cid).isdigit() or not isinstance(v, dict):
+                        continue
+                    try:
+                        ap = float(v.get("aplicacoes") or 0)
+                        fa = float(v.get("fatia") if v.get("fatia") is not None else 100)
+                    except (TypeError, ValueError):
+                        return self.send_json(400, {"error": "Aplicações e área precisam ser números"})
+                    if not (math.isfinite(ap) and math.isfinite(fa)) or ap < 0 or ap > 60 \
+                       or fa < 0 or fa > 100:
+                        return self.send_json(400, {"error":
+                            "Aplicações de 0 a 60 por ano; área de 0 a 100%"})
+                    limpo[str(cid)] = {"aplicacoes": ap, "fatia": fa}
+            cfg["culturas"] = limpo
+            with _lock:
+                _db.setdefault("settings", {})["frota"] = cfg
+                save_db()
+            return self.send_json(200, {"frota": frota_config()})
 
         # ---- Etapas do funil: renomear qualquer coluna, criar/excluir (gestor) ----
         if path == "/api/etapas" and method == "POST":

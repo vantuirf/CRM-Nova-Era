@@ -80,6 +80,51 @@
                background:#eef7ff;border:1px solid #cfe4fa;font-size:13.5px;color:#12325c}
   .familia-box b{font-size:16px}
   .familia-box .cidades{margin-top:6px;color:#4a6b8a;font-size:12.5px}
+  .abas{display:flex;gap:6px;margin:0 0 14px;border-bottom:1px solid var(--borda)}
+  .aba{background:none;border:0;border-bottom:2px solid transparent;padding:9px 16px;
+    font-size:14.5px;color:#5a6b7a;cursor:pointer;font-weight:600}
+  .aba.ativa{color:#0f7b3f;border-bottom-color:#0f7b3f}
+  .pot-tela{display:grid;grid-template-columns:340px 1fr;gap:14px;
+    height:calc(100vh - 150px);min-height:520px}
+  .pot-lado{background:#fff;border:1px solid var(--borda);border-radius:12px;
+    padding:16px;overflow-y:auto}
+  .pot-lado h3{font-size:15px;margin:0 0 6px}
+  .pot-lado h4{font-size:13px;margin:18px 0 6px;color:#2a5f92;text-transform:uppercase;
+    letter-spacing:.04em}
+  .pot-dica{font-size:12.5px;color:#5a6b7a;margin:0 0 12px;line-height:1.45}
+  .campo-f{display:block;font-size:13px;color:#1f2d3a;margin-bottom:10px;font-weight:600}
+  .campo-f .ajuda{display:block;font-weight:400;font-size:11.5px;color:#8a97a3;margin:1px 0 3px}
+  .campo-f input{width:118px;padding:6px 8px;border:1px solid var(--borda);border-radius:7px;
+    font-size:13px;margin-right:5px}
+  .campo-f small{color:#7a8794;font-weight:400}
+  #fManutModo{width:100%;padding:7px 8px;border:1px solid var(--borda);border-radius:7px;
+    font-size:13px;background:#fff;margin-bottom:8px}
+  .lista-cult{display:grid;gap:7px}
+  .linha-cult{display:grid;grid-template-columns:1fr 58px 58px;gap:6px;align-items:center;
+    font-size:12.5px}
+  .linha-cult b{font-weight:600}
+  .linha-cult small{display:block;color:#9aa6b2;font-size:11px}
+  .linha-cult input{width:100%;padding:5px 6px;border:1px solid var(--borda);border-radius:6px;
+    font-size:12.5px;text-align:right}
+  .cab-cult{display:grid;grid-template-columns:1fr 58px 58px;gap:6px;font-size:10.5px;
+    color:#9aa6b2;text-transform:uppercase;letter-spacing:.05em;margin-bottom:2px}
+  .pot-result{background:#fff;border:1px solid var(--borda);border-radius:12px;
+    padding:18px;overflow-y:auto}
+  .frota-topo{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:14px;
+    margin-bottom:18px}
+  .frota-topo .cx{border:1px solid var(--borda);border-radius:10px;padding:13px 15px;background:#fafcff}
+  .frota-topo .cx b{display:block;font-size:26px;font-weight:700;line-height:1.1;color:#0f7b3f}
+  .frota-topo .cx span{display:block;font-size:12px;color:#5a6b7a;margin-top:4px}
+  .frota-topo .cx.azul b{color:#1e63a8}
+  .rolagem-tab{overflow-x:auto}
+  .tab-frota{width:100%;border-collapse:collapse;font-size:13.5px}
+  .tab-frota th{font-size:10.5px;text-transform:uppercase;letter-spacing:.05em;color:#9aa6b2;
+    text-align:left;padding:8px 10px;border-bottom:1px solid var(--borda);font-weight:400}
+  .tab-frota td{padding:9px 10px;border-bottom:1px solid var(--borda)}
+  .tab-frota .num{text-align:right;font-variant-numeric:tabular-nums}
+  .tab-frota tr.pivo{background:#eef6fb}
+  .pot-nota{font-size:12px;color:#7a8794;margin-top:14px;line-height:1.5}
+  @media (max-width:900px){ .pot-tela{grid-template-columns:1fr;height:auto} }
   .legenda-calor{background:rgba(255,255,255,.94);border-radius:8px;padding:9px 11px;
     font-size:12px;color:#1f2d3a;box-shadow:0 1px 8px rgba(0,0,0,.28);max-width:210px;
     font-family:system-ui,-apple-system,sans-serif;line-height:1.35}
@@ -151,6 +196,12 @@
   </aside>
 
   <main>
+    <div class="abas">
+      <button class="aba ativa" data-aba="mapa">🗺️ Mapa e fazendas</button>
+      <button class="aba" data-aba="potencial">💰 Potencial da região</button>
+    </div>
+
+    <div id="painelMapa">
     <div class="kpis">
       <div class="kpi"><b id="kFaz">–</b><span>Fazendas</span></div>
       <div class="kpi"><b id="kArea">–</b><span>Hectares</span></div>
@@ -271,6 +322,60 @@
           <thead><tr><th>Município</th><th class="num" title="Ordenado pelo mercado da região">Imediato / região ↓</th><th>O que dá para vender</th></tr></thead>
           <tbody id="tbPotMun"></tbody>
         </table>
+      </div>
+    </div>
+    </div><!-- /painelMapa -->
+
+    <div id="painelPotencial" hidden>
+      <div class="pot-tela">
+        <aside class="pot-lado">
+          <h3>Como você calcula</h3>
+          <p class="pot-dica">A conta é por <b>hectare aplicado no ano</b> — área × número de
+            aplicações. É o uso que gasta o drone e vende a próxima peça.</p>
+
+          <label class="campo-f">Um drone aplica por ano
+            <span class="ajuda">quantos hectares um drone dá conta em um ano</span>
+            <input id="fDroneHa" type="number" min="1" step="100"> <small>ha/ano</small>
+          </label>
+          <label class="campo-f">Preço do drone
+            <input id="fDroneValor" type="number" min="0" step="1000"> <small>R$</small>
+          </label>
+          <label class="campo-f">Área com pivô: aplicações por ano
+            <span class="ajuda">quem tem pivô aplica o ano todo</span>
+            <input id="fPivoApl" type="number" min="0" max="60" step="1"> <small>por ano</small>
+          </label>
+
+          <h4>Aplicações por cultura</h4>
+          <p class="pot-dica">A safrinha não ocupa a área toda — ajuste o "% da área".</p>
+          <div id="fCulturas" class="lista-cult"></div>
+
+          <h4>Peças e manutenção</h4>
+          <select id="fManutModo">
+            <option value="percentual">% do valor do drone, por ano</option>
+            <option value="por_ha">R$ por hectare aplicado</option>
+            <option value="fixo">R$ por drone, por ano</option>
+          </select>
+          <label class="campo-f"><input id="fManutValor" type="number" min="0" step="1">
+            <small id="fManutUn">%</small></label>
+
+          <div class="acoes-pot">
+            <button id="btSalvarFrota" class="bt-pri">Salvar e recalcular</button>
+            <span id="frotaMsg" class="pot-msg"></span>
+          </div>
+        </aside>
+
+        <section class="pot-result">
+          <div id="frotaResumo" class="frota-topo"></div>
+          <div class="rolagem-tab">
+            <table class="tab-frota">
+              <thead><tr><th>De onde vem o serviço</th><th class="num">Área</th>
+                <th class="num">% usado</th><th class="num">Aplicações/ano</th>
+                <th class="num">Hectares aplicados/ano</th></tr></thead>
+              <tbody id="tbFrota"></tbody>
+            </table>
+          </div>
+          <p class="pot-nota" id="frotaNota"></p>
+        </section>
       </div>
     </div>
   </main>
@@ -633,6 +738,106 @@ async function carregarBolhas(){
   mostrarAviso(`${fmt(d.reduce((a,m)=>a+m.fazendas,0))} fazendas em ${d.length} municípios — aproxime para ver uma a uma`);
 }
 
+/* ---------- 💰 Aba "Potencial da região": quantos drones a região comporta
+   em um ano, e quanto isso puxa de peças e manutenção ---------- */
+let frotaCfg = null, frotaCults = [];
+
+document.querySelectorAll(".aba").forEach(b => b.onclick = () => {
+  document.querySelectorAll(".aba").forEach(x => x.classList.toggle("ativa", x === b));
+  const pot = b.dataset.aba === "potencial";
+  document.getElementById("painelMapa").hidden = pot;
+  document.getElementById("painelPotencial").hidden = !pot;
+  if (pot) carregarFrota(); else reajustaMapa();
+});
+
+const rs = v => "R$ " + Number(v || 0).toLocaleString("pt-BR", {maximumFractionDigits: 0});
+
+async function carregarFrota(){
+  const d = await api("/atlas-api/frota?" + escopo());
+  frotaCfg = d.config;
+  frotaCults = d.lista_culturas;
+  desenharConfigFrota(d);
+  const onde = terAtivo || munAtivo
+    ? document.getElementById("subtitulo").textContent : "Goiás e DF";
+  document.getElementById("frotaResumo").innerHTML = `
+    <div class="cx"><b>${fmt(d.drones)}</b><span>drones que a região comporta por ano</span></div>
+    <div class="cx"><b>${rs(d.valor_drones)}</b><span>em drones</span></div>
+    <div class="cx azul"><b>${rs(d.manutencao_ano)}</b><span>em peças e manutenção por ano</span></div>
+    <div class="cx"><b>${rs(d.total_ano)}</b><span>total no primeiro ano</span></div>`;
+  const ir = d.irrigado;
+  document.getElementById("tbFrota").innerHTML =
+    (ir.area_ha ? `<tr class="pivo"><td><b>💧 Área com pivô</b>
+        <small style="color:#7a8794">aplica o ano todo — contada só aqui, para não dobrar</small></td>
+      <td class="num">${fmt(ir.area_ha)} ha</td><td class="num">100%</td>
+      <td class="num">${fmt(ir.aplicacoes)}</td>
+      <td class="num"><b>${fmt(ir.ha_aplicados_ano)}</b></td></tr>` : "") +
+    (d.culturas.length
+      ? d.culturas.map(c => `<tr><td>🌿 ${esc(c.cultura)}</td>
+          <td class="num">${fmt(c.area_ha)} ha</td>
+          <td class="num">${fmt(c.fatia)}%</td>
+          <td class="num">${fmt(c.aplicacoes)}</td>
+          <td class="num"><b>${fmt(c.ha_aplicados_ano)}</b></td></tr>`).join("")
+      : `<tr><td colspan="5" style="color:#9aa6b2">Diga quantas aplicações cada cultura leva por ano, ao lado.</td></tr>`) +
+    `<tr style="background:#f4f8f5"><td colspan="4"><b>Total de hectares aplicados por ano em ${esc(onde)}</b></td>
+      <td class="num"><b style="color:#0f7b3f">${fmt(d.ha_aplicados_ano)}</b></td></tr>`;
+  document.getElementById("frotaNota").innerHTML =
+    `A conta: <b>${fmt(d.ha_aplicados_ano)} ha aplicados por ano ÷ ${fmt(d.config.drone_ha_ano)} ha ` +
+    `que um drone dá conta = ${fmt(d.drones)} drones</b>. A área com pivô entra uma vez só, com as ` +
+    `aplicações do ano todo; nas culturas ela é descontada para não ser contada duas vezes.`;
+}
+
+function desenharConfigFrota(d){
+  const c = d.config;
+  document.getElementById("fDroneHa").value = c.drone_ha_ano;
+  document.getElementById("fDroneValor").value = c.drone_valor;
+  document.getElementById("fPivoApl").value = c.pivo_aplicacoes;
+  document.getElementById("fManutModo").value = c.manutencao_modo;
+  document.getElementById("fManutValor").value = c.manutencao_valor;
+  unidadeManut();
+  document.getElementById("fCulturas").innerHTML =
+    `<div class="cab-cult"><span>Cultura</span><span>Apl.</span><span>% área</span></div>` +
+    frotaCults.map(x => {
+      const cf = c.culturas[String(x.id)] || {aplicacoes: 0, fatia: 100};
+      return `<div class="linha-cult">
+        <span><b>${esc(x.nome)}</b><small>${fmt(x.area_ha)} ha</small></span>
+        <input data-cult="${x.id}" data-c="aplicacoes" type="number" min="0" max="60" step="1" value="${cf.aplicacoes}">
+        <input data-cult="${x.id}" data-c="fatia" type="number" min="0" max="100" step="5" value="${cf.fatia}">
+      </div>`;
+    }).join("");
+}
+
+function unidadeManut(){
+  const m = document.getElementById("fManutModo").value;
+  document.getElementById("fManutUn").textContent =
+    m === "percentual" ? "% do valor do drone, por ano"
+    : m === "por_ha" ? "R$ por hectare aplicado" : "R$ por drone, por ano";
+}
+document.getElementById("fManutModo").onchange = unidadeManut;
+
+document.getElementById("btSalvarFrota").onclick = async () => {
+  const msg = document.getElementById("frotaMsg");
+  const culturas = {};
+  document.querySelectorAll("#fCulturas [data-cult]").forEach(el => {
+    const id = el.dataset.cult;
+    culturas[id] = culturas[id] || {aplicacoes: 0, fatia: 100};
+    culturas[id][el.dataset.c] = Number(el.value);
+  });
+  const corpo = {
+    drone_ha_ano: Number(document.getElementById("fDroneHa").value),
+    drone_valor: Number(document.getElementById("fDroneValor").value),
+    pivo_aplicacoes: Number(document.getElementById("fPivoApl").value),
+    manutencao_modo: document.getElementById("fManutModo").value,
+    manutencao_valor: Number(document.getElementById("fManutValor").value),
+    culturas
+  };
+  const d = await api("/api/frota", {method: "POST",
+    headers: {"Content-Type": "application/json"}, body: JSON.stringify(corpo)});
+  if (d.error){ msg.style.color = "#a33"; msg.textContent = d.error; return; }
+  msg.style.color = "#0f7b3f"; msg.textContent = "Salvo.";
+  setTimeout(() => msg.textContent = "", 2500);
+  carregarFrota();
+};
+
 /* 🔥 Mapa de calor: pinta cada CIDADE conforme a área irrigada por pivô que
    ela tem. A escala é relativa ao maior município do recorte. */
 const CORES_CALOR = ["#fff5eb","#fee0b6","#fdae61","#f46d43","#d73027","#8c0f1d"];
@@ -873,6 +1078,7 @@ async function carregarMapa(){
 
 function atualizarTudo(){ carregarResumo(); carregarFazendas(); carregarMapa();
                           carregarCulturas(); carregarLimite(); carregarPivos(); if (calorLigado) carregarCalor();
+                          if (!document.getElementById("painelPotencial").hidden) carregarFrota();
                           carregarPotencial().catch(()=>{}).then(carregarPessoas); }
 
 async function abrirFazenda(id){
