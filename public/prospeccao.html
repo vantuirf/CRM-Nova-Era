@@ -527,7 +527,7 @@ async function carregarTerritorios(){
   const ts = await api("/atlas-api/territorios");
   document.getElementById("listaTer").innerHTML = ts.length ? ts.map(t =>
     `<div class="mun ter" data-tid="${t.id}">
-       <span>${esc(t.nome)}<br><small>${t.municipios} munic. · ${fmt(t.fazendas)} faz.</small></span>
+       <span>${esc(t.nome)}<br><small>${t.municipios} munic. · ${fmt(t.fazendas)} faz. · ${fmt(t.area_ha)} ha</small></span>
        <small onclick='event.stopPropagation();iniciarMontagem(${JSON.stringify({id:t.id,nome:t.nome,municipio_ids:t.municipio_ids})})'
               style="cursor:pointer" title="Editar clicando nas cidades">✎</small>
        <small onclick="event.stopPropagation();excluirTer(${t.id})" style="cursor:pointer" title="Excluir">✕</small>
@@ -570,7 +570,10 @@ async function ligarFundoMont(){
     fundoMont.addLayer(L.polygon(m.aneis.map(a => a.map(([x, y]) => [y, x])), {
       color: "#ffffff", weight: 1, opacity: .65, dashArray: "3 3",
       fillColor: "#ffffff", fillOpacity: .04
-    }).bindTooltip(m.nome, {sticky: true})
+    }).bindTooltip(() => {
+        const inf = municipiosCache.find(x => String(x.id) === String(m.id)) || {};
+        return `${m.nome} — ${fmt(inf.fazendas || 0)} faz. · ${fmt(inf.area_ha || 0)} ha`;
+      }, {sticky: true})
       .on("click", () => { if (montando) toggleMont(m.id); }));
   });
   if (montando) fundoMont.addTo(mapa);
@@ -632,19 +635,19 @@ async function desenharContornoMont(id){
 }
 
 function atualizarCartaoMont(){
-  const nomes = [], tot = {cid: 0, faz: 0};
+  const nomes = [], tot = {cid: 0, faz: 0, ha: 0};
   municipiosCache.forEach(m => {
     const el = document.querySelector(`#listaMun .mun[data-id="${m.id}"]`);
     const dentro = montSel.has(Number(m.id));
     if (el) el.classList.toggle("mont", dentro);
-    if (dentro){ nomes.push(m); tot.cid++; tot.faz += m.fazendas; }
+    if (dentro){ nomes.push(m); tot.cid++; tot.faz += m.fazendas; tot.ha += (m.area_ha || 0); }
   });
   document.getElementById("mtChips").innerHTML = nomes.length
     ? nomes.sort((a, b) => b.fazendas - a.fazendas).map(m =>
         `<span class="mt-chip">${esc(m.nome)}<b onclick="toggleMont(${m.id})" title="Tirar">×</b></span>`).join("")
     : `<small style="color:#9aa6b2">Nenhuma cidade ainda — clique no mapa ou na lista.</small>`;
   document.getElementById("mtTotais").textContent =
-    tot.cid ? `${tot.cid} cidade(s) · ${fmt(tot.faz)} fazendas` : "";
+    tot.cid ? `${tot.cid} cidade(s) · ${fmt(tot.faz)} fazendas · ${fmt(Math.round(tot.ha))} ha` : "";
 }
 
 document.getElementById("mtSalvar").onclick = async () => {
@@ -1307,7 +1310,8 @@ async function carregarAreas(){
     L.polygon(f.aneis.map(a => a.map(([x,y]) => [y,x])), {
       color: corDa(f.categoria), weight: 1.4, opacity: .95,
       fillColor: corDa(f.categoria), fillOpacity: .12
-    }).bindPopup(
+    }).bindTooltip(`${esc(f.nome)} · ${fmt(Math.round(f.area_total_ha))} ha`, {sticky: true})
+      .bindPopup(
       `<b>${esc(f.nome)}</b>` + (f.dono ? `<br>👤 ${esc(f.dono)}` : "") +
       `<br>${fmt(Math.round(f.area_total_ha))} ha` +
       `<br>Perímetro: ${f.perimetro_km ? f.perimetro_km.toFixed(2) : "–"} km` +
@@ -1369,7 +1373,8 @@ async function carregarMapa(){
                : p.categoria==="lead"    ? "#ffc400"
                : p.categoria==="descartada" ? "#ff5252" : "#40c4ff",
       color: "#ffffff", weight: 1.2, opacity: .9, fillOpacity: .8
-    }).bindPopup(`<b>${esc(p.nome)}</b>` + (p.dono ? `<br>👤 ${esc(p.dono)}` : "") + `<br>${fmt(p.area_total_ha)} ha`)
+    }).bindTooltip(`${esc(p.nome)} · ${fmt(Math.round(p.area_total_ha))} ha`, {sticky: true})
+      .bindPopup(`<b>${esc(p.nome)}</b>` + (p.dono ? `<br>👤 ${esc(p.dono)}` : "") + `<br>${fmt(p.area_total_ha)} ha`)
       .on("click", ()=>abrirFazenda(p.id))
   ));
   camadaPontos.addTo(mapa);
