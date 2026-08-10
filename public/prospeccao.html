@@ -1257,6 +1257,27 @@ async function carregarPerenes(){
     mostrarAviso(d.resumo.map(r => `${r.nome}: ${fmt(r.n)} talhões · ${fmt(r.ha)} ha`).join("  |  "));
 }
 
+/* contorno em DELTA -> aneis [[lon,lat],...] — mesmo formato do servidor */
+function decodificaDelta(d){
+  const aneis = [];
+  for (const parte of String(d || "").split("|")){
+    if (!parte) continue;
+    let x = 0, y = 0;
+    const anel = [];
+    for (const par of parte.split(";")){
+      const v = par.split(",");
+      if (v.length !== 2) continue;
+      x += parseInt(v[0], 10); y += parseInt(v[1], 10);
+      anel.push([x / 1e5, y / 1e5]);
+    }
+    if (anel.length >= 3) aneis.push(anel);
+  }
+  return aneis;
+}
+
+/* fazendas já desenhadas ficam em cache: arrastar de volta é instantâneo */
+const cacheContorno = new Map();
+
 async function carregarAreas(){
   if (!mapa) return;
   const z = mapa.getZoom();
@@ -1290,7 +1311,7 @@ async function carregarAreas(){
     b = L.latLngBounds(bboxRecorte);
   }
   const ps = escopo({norte:b.getNorth(), sul:b.getSouth(),
-                     leste:b.getEast(),  oeste:b.getWest()});
+                     leste:b.getEast(),  oeste:b.getWest(), formato:"delta"});
   const cat = document.getElementById("fCat").value;
   if (cat) ps.set("categoria", cat);
 
@@ -1305,18 +1326,37 @@ async function carregarAreas(){
     mostrarAviso("contornos não disponíveis nesta instalação — mostrando os pontos");
     return;
   }
-  if (camadaAreas) camadaAreas.remove();
-  camadaAreas = L.layerGroup(d.fazendas.map(f =>
-    L.polygon(f.aneis.map(a => a.map(([x,y]) => [y,x])), {
-      color: corDa(f.categoria), weight: 1.4, opacity: .95,
-      fillColor: corDa(f.categoria), fillOpacity: .12
-    }).bindTooltip(`${esc(f.nome)} · ${fmt(Math.round(f.area_total_ha))} ha`, {sticky: true})
-      .bindPopup(
+  if (!camadaAreas){ camadaAreas = L.layerGroup(); }
+  if (!mapa.hasLayer(camadaAreas)) camadaAreas.addTo(mapa);
+  const naVista = new Set();
+  d.fazendas.forEach(f => {
+    naVista.add(f.id);
+    let pol = cacheContorno.get(f.id);
+    if (!pol){
+      const aneis = f.aneis || decodificaDelta(f.d);
+      if (!aneis.length) return;
+      pol = L.polygon(aneis.map(a => a.map(([x,y]) => [y,x])), {
+        color: corDa(f.categoria), weight: 1.4, opacity: .95,
+        fillColor: corDa(f.categoria), fillOpacity: .12
+      }).bindTooltip(`${esc(f.nome)} · ${fmt(Math.round(f.area_total_ha))} ha`, {sticky: true})
+        .bindPopup(
       `<b>${esc(f.nome)}</b>` + (f.dono ? `<br>👤 ${esc(f.dono)}` : "") +
       `<br>${fmt(Math.round(f.area_total_ha))} ha` +
       `<br>Perímetro: ${f.perimetro_km ? f.perimetro_km.toFixed(2) : "–"} km` +
-      `<br><a href="#" onclick="abrirFazenda(${f.id});return false">abrir ficha</a>`)
-  )).addTo(mapa);
+      `<br><a href="#" onclick="abrirFazenda(${f.id});return false">abrir ficha</a>`);
+      cacheContorno.set(f.id, pol);
+    }
+    if (!camadaAreas.hasLayer(pol)) camadaAreas.addLayer(pol);
+  });
+  // tira da tela (mas nao do cache) o que saiu da vista, para nao acumular
+  if (camadaAreas.getLayers().length > 2600){
+    camadaAreas.eachLayer(l => {
+      const fid = [...cacheContorno.entries()].find(([, p]) => p === l);
+      if (fid && !naVista.has(fid[0])) camadaAreas.removeLayer(l);
+    });
+  }
+  if (cacheContorno.size > 8000) cacheContorno.clear();   // teto de memoria
+
 
   mostrarAviso(d.mostrando < d.total_na_area
     ? `mostrando as ${fmt(d.mostrando)} maiores de ${fmt(d.total_na_area)} — aproxime para ver todas`

@@ -3356,8 +3356,16 @@ class Handler(BaseHTTPRequestHandler):
 
     def send_json(self, status, obj, headers=None):
         body = json.dumps(obj, ensure_ascii=False, allow_nan=False).encode("utf-8")
+        # resposta grande viaja comprimida quando o navegador aceita: os
+        # contornos do mapa caem de ~1 MB para ~100 KB por arrastada
+        comprimido = False
+        if len(body) > 2048 and "gzip" in (self.headers.get("Accept-Encoding") or ""):
+            body = gzip.compress(body, 5)
+            comprimido = True
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
+        if comprimido:
+            self.send_header("Content-Encoding", "gzip")
         self.send_header("Content-Length", str(len(body)))
         self.headers_seguranca()
         for k, v in (headers or {}).items():
@@ -4256,8 +4264,18 @@ class Handler(BaseHTTPRequestHandler):
                 total = con.execute(
                     "SELECT COUNT(*) c FROM fazendas f WHERE " + " AND ".join(cond), params).fetchone()["c"]
                 saida = []
+                compacto = (qs.get("formato") or [""])[0] == "delta" and contorno_delta
                 for r in rows:
                     try:
+                        if compacto:
+                            # o delta e ~13x menor que as coordenadas abertas;
+                            # a tela decodifica (mesmo algoritmo em JS)
+                            saida.append({"id": r["id"], "nome": r["nome"],
+                                          "area_total_ha": r["area_total_ha"],
+                                          "perimetro_km": r["perimetro_km"],
+                                          "categoria": r["categoria"], "dono": r["dono"],
+                                          "d": r["geo"]})
+                            continue
                         if contorno_delta:
                             aneis = _atlas_decodifica(r["geo"])
                         else:
